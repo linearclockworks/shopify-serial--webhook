@@ -27,12 +27,15 @@ def get_google_sheet():
         scopes = ['https://www.googleapis.com/auth/spreadsheets']
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
-        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        
+        # Use the Clocks tab
+        sheet = spreadsheet.worksheet('Clocks')
         return sheet
     except Exception as e:
         print(f"Error connecting to Google Sheets: {e}")
         return None
-
+        
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
     """Log serial number to Google Sheet using existing structure"""
     try:
