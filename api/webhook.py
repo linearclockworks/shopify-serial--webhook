@@ -153,11 +153,10 @@ class handler(BaseHTTPRequestHandler):
                 product_title = item.get('title', '')
                 quantity = item.get('quantity', 1)
                 
-                # Check if this product needs serials
-                needs_serial = any(
-                    prod.lower() in product_title.lower() 
-                    for prod in SERIALIZED_PRODUCTS
-                )
+               
+              # Check if this product needs serials (any SKU starting with LCK-)
+                sku = item.get('sku', '')
+                needs_serial = sku.startswith('LCK-')
                 
                 if needs_serial:
                     for i in range(quantity):
