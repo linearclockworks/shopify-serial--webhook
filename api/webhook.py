@@ -6,8 +6,6 @@ import base64
 import os
 import urllib.request
 import urllib.error
-import gspread
-from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
@@ -23,26 +21,43 @@ GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 def get_google_sheet():
     """Get Google Sheet client"""
     try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        
+        print(f"Sheet ID: {GOOGLE_SHEET_ID}")
+        print(f"Credentials available: {bool(GOOGLE_CREDS_JSON)}")
+        
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
         scopes = ['https://www.googleapis.com/auth/spreadsheets']
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
+        
+        print("Authorized with Google")
+        
         spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        print(f"Opened spreadsheet: {spreadsheet.title}")
         
         # Use the Clocks tab
         sheet = spreadsheet.worksheet('Clocks')
+        print(f"Opened worksheet: {sheet.title}")
+        
         return sheet
     except Exception as e:
         print(f"Error connecting to Google Sheets: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
     """Log serial number to Google Sheet using existing structure"""
     try:
+        print(f"Attempting to log: {serial} for {product_name}")
         sheet = get_google_sheet()
         if not sheet:
             print("Could not connect to Google Sheet")
             return False
+        
+        print("Connected to sheet successfully")
         
         # Parse product name: "Wade: 5-foot Cherry / resin" 
         # -> Name: "Wade", Description: "5-foot Cherry / resin"
@@ -53,11 +68,9 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             name_part = product_name
             description_part = ''
         
-        # Your columns are: Serial, Name, Description, Avail, Order No, Bras tag description, 
-        # Pointer, Font, Special order?, order date, color, PCB ver, Lettering width, 
-        # Steps, Sled, Comments,, Quality, On website?, Location, Layout, Type, Speed steps/sec, Comments
+        print(f"Parsed - Name: {name_part}, Description: {description_part}")
         
-        # We'll fill in: Serial, Name, Description, (skip Avail), Order No, (skip rest for now), order date
+        # Build row for your existing columns
         row = [
             serial,           # Serial
             name_part,        # Name
@@ -85,15 +98,16 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             ''                # Comments
         ]
         
-        # Append new row (starting at row 2, after headers)
+        print(f"Appending row: {row[:5]}...")  # Print first 5 columns
         sheet.append_row(row)
-        print(f"Logged to Google Sheet: {serial} - {name_part}")
+        print(f"Successfully logged to Google Sheet: {serial} - {name_part}")
         return True
     except Exception as e:
         print(f"Error logging to Google Sheet: {e}")
         import traceback
         traceback.print_exc()
         return False
+
 def verify_webhook(data, hmac_header):
     """Verify webhook is from Shopify"""
     if not SHOPIFY_SECRET or not hmac_header:
@@ -176,11 +190,7 @@ def webhook():
         body = request.get_data()
         hmac_header = request.headers.get('X-Shopify-Hmac-Sha256', '')
         
-        # Skip verification for now - we'll add it back later
-        # if not verify_webhook(body, hmac_header):
-        #     print("Webhook verification failed")
-        #     return jsonify({'error': 'Unauthorized'}), 401
-        
+        # Skip verification for now
         print("Processing webhook")
         order_data = json.loads(body)
         order_id = order_data.get('id')
@@ -231,40 +241,19 @@ def webhook():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/test-sheets', methods=['GET'])
-def test_sheets():
-    """Test Google Sheets connection"""
-    try:
-        sheet = get_google_sheet()
-        if not sheet:
-            return jsonify({'error': 'Could not connect to sheet'}), 500
-        
-        # Try to read first cell
-        first_cell = sheet.cell(1, 1).value
-        row_count = sheet.row_count
-        
-        return jsonify({
-            'status': 'success',
-            'first_cell': first_cell,
-            'row_count': row_count,
-            'sheet_title': sheet.title
-        }), 200
-    except Exception as e:
-        import traceback
-        return jsonify({
-            'error': str(e),
-            'traceback': traceback.format_exc()
-        }), 500
 @app.route('/api/test', methods=['GET'])
 def test():
     """Test endpoint - add serial to a specific order"""
     order_id = request.args.get('order_id')
     
     if not order_id:
-        return jsonify({'error': 'Missing order_id parameter. Use: /api/test?order_id=12345'}), 400
+        return jsonify({'error': 'Missing order_id parameter'}), 400
     
     try:
-        # Get order details for logging
+        print(f"=== TEST ENDPOINT CALLED ===")
+        print(f"Order ID: {order_id}")
+        
+        # Get order details
         result = shopify_api_call(f'orders/{order_id}.json')
         if not result:
             return jsonify({'error': 'Could not fetch order'}), 500
@@ -274,36 +263,44 @@ def test():
         customer = order.get('customer', {})
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
         
-        # Get first item for product name
         line_items = order.get('line_items', [])
         product_name = line_items[0].get('title', '') if line_items else 'Unknown'
         
         from datetime import datetime
         order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
+        print(f"Order: {order_number}, Product: {product_name}")
+        
         serial, counter = get_next_serial()
+        print(f"Generated serial: {serial}")
+        
         if serial:
             success = add_serial_to_order(order_id, serial)
+            print(f"Added to order: {success}")
+            
             if success:
                 # Log to Google Sheet
-                log_to_google_sheet(product_name, serial, order_number, customer_name, order_date)
+                sheet_result = log_to_google_sheet(product_name, serial, order_number, customer_name, order_date)
+                print(f"Logged to sheet: {sheet_result}")
                 
                 return jsonify({
                     'status': 'success',
                     'serial': serial,
-                    'order_id': order_id,
-                    'message': f'Added serial {serial} to order {order_number}'
+                    'order_number': order_number,
+                    'logged_to_sheet': sheet_result
                 }), 200
-            else:
-                return jsonify({'error': 'Failed to add serial to order'}), 500
-        else:
-            return jsonify({'error': 'Failed to generate serial'}), 500
+        
+        return jsonify({'error': 'Failed'}), 500
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f"ERROR in test endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 @app.route('/api/next-serial', methods=['GET'])
 def next_serial():
-    """Check what the next serial will be (without incrementing)"""
+    """Check what the next serial will be"""
     try:
         result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
         if result and result.get('metafields'):
@@ -312,7 +309,6 @@ def next_serial():
                 'current_counter': current,
                 'next_serial': f'LCK-{current}'
             }), 200
-        else:
-            return jsonify({'error': 'Counter not found'}), 404
+        return jsonify({'error': 'Counter not found'}), 404
     except Exception as e:
         return jsonify({'error': str(e)}), 500
