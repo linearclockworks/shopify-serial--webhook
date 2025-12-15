@@ -298,6 +298,15 @@ def test():
         traceback.print_exc()
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
+
+@app.route('/api/debug', methods=['GET'])
+def debug():
+    """Debug endpoint to check code version"""
+    return jsonify({
+        'version': '2024-12-15-v2',
+        'has_logged_to_sheet_in_test': 'sheet_result' in open(__file__).read()
+    }), 200
+
 @app.route('/api/next-serial', methods=['GET'])
 def next_serial():
     """Check what the next serial will be"""
