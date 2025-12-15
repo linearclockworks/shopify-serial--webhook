@@ -1,0 +1,10 @@
+# No external dependencies - using Python stdlib only
+```
+
+**Create `.gitignore`:**
+```
+.env
+.vercel
+__pycache__/
+*.pyc
+.DS_Store
