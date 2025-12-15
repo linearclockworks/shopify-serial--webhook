@@ -1,1 +1,1 @@
-# No external dependencies
+Flask==3.0.0
