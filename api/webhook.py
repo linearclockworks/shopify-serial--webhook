@@ -5,7 +5,6 @@ import hashlib
 import base64
 import os
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler
 import urllib.request
 import urllib.error
 
@@ -13,9 +12,6 @@ import urllib.error
 SHOPIFY_SECRET = os.environ.get('SHOPIFY_API_SECRET')
 SHOPIFY_SHOP = os.environ.get('SHOPIFY_SHOP_NAME')  # e.g., 'yourstore'
 SHOPIFY_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
-
-# Products that need serial numbers
-SERIALIZED_PRODUCTS = ['Wade', 'Madison', 'Parker']
 
 def verify_webhook(data, hmac_header):
     """Verify webhook is from Shopify"""
@@ -46,6 +42,9 @@ def shopify_api_call(endpoint, method='GET', data=None):
     except urllib.error.HTTPError as e:
         print(f"API Error: {e.code} {e.read().decode()}")
         return None
+    except Exception as e:
+        print(f"Request Error: {e}")
+        return None
 
 def get_next_serial():
     """Get and increment global serial counter"""
@@ -53,6 +52,7 @@ def get_next_serial():
     result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
     
     if not result:
+        print("Failed to get metafields")
         return None, None
     
     metafields = result.get('metafields', [])
@@ -78,6 +78,7 @@ def get_next_serial():
         
         return serial, current
     else:
+        print("No metafield found, would create one")
         # Create metafield starting at 1010
         create_data = {
             'metafield': {
@@ -95,6 +96,7 @@ def add_serial_to_order(order_id, serial):
     # Get current order
     result = shopify_api_call(f'orders/{order_id}.json')
     if not result:
+        print(f"Failed to get order {order_id}")
         return False
     
     order = result.get('order', {})
@@ -123,25 +125,39 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name):
     print(f"Logging: {serial} | {product_name} | {order_number} | {customer_name}")
     return True
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
+# Vercel serverless function entry point
+def handler(request):
+    """Main handler for Vercel"""
+    
+    if request.method == 'GET':
+        return {
+            'statusCode': 200,
+            'headers': {'Content-Type': 'text/plain'},
+            'body': 'Webhook handler is running'
+        }
+    
+    if request.method == 'POST':
         try:
-            # Read request body
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
+            # Get request body
+            body = request.body
             
             # Verify webhook
-            hmac_header = self.headers.get('X-Shopify-Hmac-SHA256', '')
+            hmac_header = request.headers.get('x-shopify-hmac-sha256', '')
             if not verify_webhook(body, hmac_header):
-                self.send_response(401)
-                self.end_headers()
-                self.wfile.write(b'Unauthorized')
-                return
+                print("Webhook verification failed")
+                return {
+                    'statusCode': 401,
+                    'body': 'Unauthorized'
+                }
+            
+            print("Webhook verified successfully")
             
             # Parse order data
             order_data = json.loads(body.decode('utf-8'))
             order_id = order_data.get('id')
             order_number = order_data.get('name', '')
+            
+            print(f"Processing order {order_number} (ID: {order_id})")
             
             # Get customer name
             customer = order_data.get('customer', {})
@@ -151,44 +167,59 @@ class handler(BaseHTTPRequestHandler):
             serials_generated = []
             for item in order_data.get('line_items', []):
                 product_title = item.get('title', '')
+                sku = item.get('sku', '')
                 quantity = item.get('quantity', 1)
                 
-               
-              # Check if this product needs serials (any SKU starting with LCK-)
-                sku = item.get('sku', '')
+                print(f"Checking item: {product_title} (SKU: {sku})")
+                
+                # Check if this product needs serials (SKU starts with LCK-)
                 needs_serial = sku.startswith('LCK-')
                 
                 if needs_serial:
+                    print(f"Item needs serial! Generating {quantity} serial(s)")
                     for i in range(quantity):
                         serial, counter = get_next_serial()
                         if serial:
+                            print(f"Generated serial: {serial}")
                             serials_generated.append(serial)
                             log_to_google_sheet(product_title, serial, order_number, customer_name)
+                        else:
+                            print("Failed to generate serial")
+                else:
+                    print(f"Item does not need serial (SKU doesn't start with LCK-)")
             
             # Add all serials to order note
             if serials_generated:
                 serial_text = ', '.join(serials_generated)
-                add_serial_to_order(order_id, serial_text)
+                print(f"Adding serials to order: {serial_text}")
+                success = add_serial_to_order(order_id, serial_text)
+                if success:
+                    print("Successfully added serials to order")
+                else:
+                    print("Failed to add serials to order")
+            else:
+                print("No serials generated for this order")
             
             # Success response
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            response = {
-                'status': 'success',
-                'serials_generated': serials_generated
+            return {
+                'statusCode': 200,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'status': 'success',
+                    'serials_generated': serials_generated
+                })
             }
-            self.wfile.write(json.dumps(response).encode())
             
         except Exception as e:
             print(f"Error: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+            import traceback
+            traceback.print_exc()
+            return {
+                'statusCode': 500,
+                'body': str(e)
+            }
     
-    def do_GET(self):
-        # Health check endpoint
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'Webhook handler is running')
+    return {
+        'statusCode': 405,
+        'body': 'Method not allowed'
+    }
