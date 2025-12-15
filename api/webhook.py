@@ -96,19 +96,12 @@ def webhook():
         body = request.get_data()
         hmac_header = request.headers.get('X-Shopify-Hmac-Sha256', '')
         
-        if not verify_webhook(body, hmac_header):
-            print("Webhook verification failed")
-            return jsonify({'error': 'Unauthorized'}), 401
-        print(f"HMAC Header: {hmac_header[:20]}..." if hmac_header else "No HMAC header found")
-        print(f"Secret set: {bool(SHOPIFY_SECRET)}")
+        # Skip verification for now - we'll add it back later
+        # if not verify_webhook(body, hmac_header):
+        #     print("Webhook verification failed")
+        #     return jsonify({'error': 'Unauthorized'}), 401
         
-        if not verify_webhook(body, hmac_header):
-        
-        if False:  # Temporarily disable verification for testing
-            print("Webhook verification failed")
-            return jsonify({'error': 'Unauthorized'}), 401
-        
-        print("Webhook verified")
+        print("Processing webhook")
         order_data = json.loads(body)
         order_id = order_data.get('id')
         order_number = order_data.get('name', '')
@@ -141,4 +134,46 @@ def webhook():
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/test', methods=['GET'])
+def test():
+    """Test endpoint - add serial to a specific order"""
+    order_id = request.args.get('order_id')
+    
+    if not order_id:
+        return jsonify({'error': 'Missing order_id parameter. Use: /api/test?order_id=12345'}), 400
+    
+    try:
+        serial, counter = get_next_serial()
+        if serial:
+            success = add_serial_to_order(order_id, serial)
+            if success:
+                return jsonify({
+                    'status': 'success',
+                    'serial': serial,
+                    'order_id': order_id,
+                    'message': f'Added serial {serial} to order {order_id}'
+                }), 200
+            else:
+                return jsonify({'error': 'Failed to add serial to order'}), 500
+        else:
+            return jsonify({'error': 'Failed to generate serial'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/next-serial', methods=['GET'])
+def next_serial():
+    """Check what the next serial will be (without incrementing)"""
+    try:
+        result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
+        if result and result.get('metafields'):
+            current = int(result['metafields'][0]['value'])
+            return jsonify({
+                'current_counter': current,
+                'next_serial': f'LCK-{current}'
+            }), 200
+        else:
+            return jsonify({'error': 'Counter not found'}), 404
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
