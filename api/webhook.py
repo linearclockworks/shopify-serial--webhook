@@ -35,7 +35,7 @@ def get_google_sheet():
     except Exception as e:
         print(f"Error connecting to Google Sheets: {e}")
         return None
-        
+
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
     """Log serial number to Google Sheet using existing structure"""
     try:
@@ -231,6 +231,30 @@ def webhook():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/test-sheets', methods=['GET'])
+def test_sheets():
+    """Test Google Sheets connection"""
+    try:
+        sheet = get_google_sheet()
+        if not sheet:
+            return jsonify({'error': 'Could not connect to sheet'}), 500
+        
+        # Try to read first cell
+        first_cell = sheet.cell(1, 1).value
+        row_count = sheet.row_count
+        
+        return jsonify({
+            'status': 'success',
+            'first_cell': first_cell,
+            'row_count': row_count,
+            'sheet_title': sheet.title
+        }), 200
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
 @app.route('/api/test', methods=['GET'])
 def test():
     """Test endpoint - add serial to a specific order"""
