@@ -49,18 +49,10 @@ def get_google_sheet():
         return None
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
-    """Log serial number to Google Sheet using existing structure"""
     try:
-        print(f"Attempting to log: {serial} for {product_name}")
         sheet = get_google_sheet()
         if not sheet:
-            print("Could not connect to Google Sheet")
             return False
-        
-        print("Connected to sheet successfully")
-        
-        # Parse product name: "Wade: 5-foot Cherry / resin" 
-        # -> Name: "Wade", Description: "5-foot Cherry / resin"
         if ':' in product_name:
             name_part = product_name.split(':', 1)[0].strip()
             description_part = product_name.split(':', 1)[1].strip()
@@ -68,44 +60,40 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             name_part = product_name
             description_part = ''
         
-        print(f"Parsed - Name: {name_part}, Description: {description_part}")
+        # Remove LCK- prefix for sheet (e.g., "LCK-1023" becomes "1023")
+        serial_number_only = serial.replace('LCK-', '')
         
-        # Build row for your existing columns
+        # Remove first two empty columns - start directly with Serial
         row = [
-            serial,           # Serial
-            name_part,        # Name
-            description_part, # Description
-            '',               # Avail
-            order_number,     # Order No
-            '',               # Bras tag description
-            '',               # Pointer
-            '',               # Font
-            '',               # Special order?
-            order_date,       # order date
-            '',               # color
-            '',               # PCB ver
-            '',               # Lettering width
-            '',               # Steps
-            '',               # Sled
-            '',               # Comments
-            '',               # (empty column)
-            '',               # Quality
-            '',               # On website?
-            '',               # Location
-            '',               # Layout
-            '',               # Type
-            '',               # Speed steps/sec
-            ''                # Comments
+            serial_number_only,  # Serial
+            name_part,           # Name
+            description_part,    # Description
+            '',                  # Avail
+            order_number,        # Order No
+            '',                  # Bras tag description
+            '',                  # Pointer
+            '',                  # Font
+            '',                  # Special order?
+            order_date,          # order date
+            '',                  # color
+            '',                  # PCB ver
+            '',                  # Lettering width
+            '',                  # Steps
+            '',                  # Sled
+            '',                  # Comments
+            '',                  # (empty column)
+            '',                  # Quality
+            '',                  # On website?
+            '',                  # Location
+            '',                  # Layout
+            '',                  # Type
+            '',                  # Speed steps/sec
+            ''                   # Comments
         ]
-        
-        print(f"Appending row: {row[:5]}...")  # Print first 5 columns
         sheet.append_row(row)
-        print(f"Successfully logged to Google Sheet: {serial} - {name_part}")
         return True
     except Exception as e:
-        print(f"Error logging to Google Sheet: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Log error: {e}")
         return False
 
 def verify_webhook(data, hmac_header):

@@ -37,14 +37,42 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         else:
             name_part = product_name
             description_part = ''
-        row = [serial, name_part, description_part, '', order_number, '', '', '', '', 
-               order_date, '', '', '', '', '', '', '', '', '', '', '', '', '']
+        
+        # Remove LCK- prefix for sheet (e.g., "LCK-1023" becomes "1023")
+        serial_number_only = serial.replace('LCK-', '')
+        
+        # Remove first two empty columns - start directly with Serial
+        row = [
+            serial_number_only,  # Serial
+            name_part,           # Name
+            description_part,    # Description
+            '',                  # Avail
+            order_number,        # Order No
+            '',                  # Bras tag description
+            '',                  # Pointer
+            '',                  # Font
+            '',                  # Special order?
+            order_date,          # order date
+            '',                  # color
+            '',                  # PCB ver
+            '',                  # Lettering width
+            '',                  # Steps
+            '',                  # Sled
+            '',                  # Comments
+            '',                  # (empty column)
+            '',                  # Quality
+            '',                  # On website?
+            '',                  # Location
+            '',                  # Layout
+            '',                  # Type
+            '',                  # Speed steps/sec
+            ''                   # Comments
+        ]
         sheet.append_row(row)
         return True
     except Exception as e:
         print(f"Log error: {e}")
         return False
-
 def shopify_api_call(endpoint, method='GET', data=None):
     url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2024-01/{endpoint}"
     headers = {'X-Shopify-Access-Token': SHOPIFY_TOKEN, 'Content-Type': 'application/json'}
