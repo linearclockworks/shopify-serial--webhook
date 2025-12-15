@@ -1,10 +1,7 @@
-from flask import Flask, request, jsonify
 import json
 import os
 import urllib.request
 import urllib.error
-
-app = Flask(__name__)
 
 SHOPIFY_SHOP = os.environ.get('SHOPIFY_SHOP_NAME', '')
 SHOPIFY_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
@@ -12,7 +9,6 @@ GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
 GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
 def get_google_sheet():
-    """Get Google Sheet client"""
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -27,15 +23,14 @@ def get_google_sheet():
         print(f"Connected to sheet: {sheet.title}")
         return sheet
     except Exception as e:
-        print(f"Error connecting to Google Sheets: {e}")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
-    """Log serial number to Google Sheet"""
     try:
-        print(f"Logging: {serial} for {product_name}")
+        print(f"Logging: {serial}")
         sheet = get_google_sheet()
         if not sheet:
             return False
@@ -51,12 +46,10 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
                order_date, '', '', '', '', '', '', '', '', '', '', '', '', '']
         
         sheet.append_row(row)
-        print(f"Successfully logged: {serial}")
+        print(f"Logged: {serial}")
         return True
     except Exception as e:
-        print(f"Error logging: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
         return False
 
 def shopify_api_call(endpoint, method='GET', data=None):
@@ -68,7 +61,6 @@ def shopify_api_call(endpoint, method='GET', data=None):
         with urllib.request.urlopen(req, timeout=10) as response:
             return json.loads(response.read().decode())
     except Exception as e:
-        print(f"API Error: {e}")
         return None
 
 def get_next_serial():
@@ -98,16 +90,24 @@ def add_serial_to_order(order_id, serial):
     result = shopify_api_call(f'orders/{order_id}.json', method='PUT', data=update_data)
     return result is not None
 
-@app.route('/api/test')
-def handler():
-    order_id = request.args.get('order_id')
+def handler(event, context):
+    # Parse query parameters
+    query = event.get('queryStringParameters', {}) or {}
+    order_id = query.get('order_id')
+    
     if not order_id:
-        return jsonify({'error': 'Missing order_id'}), 400
+        return {
+            'statusCode': 400,
+            'body': json.dumps({'error': 'Missing order_id'})
+        }
     
     try:
         result = shopify_api_call(f'orders/{order_id}.json')
         if not result:
-            return jsonify({'error': 'Could not fetch order'}), 500
+            return {
+                'statusCode': 500,
+                'body': json.dumps({'error': 'Could not fetch order'})
+            }
         
         order = result.get('order', {})
         order_number = order.get('name', '')
@@ -124,14 +124,24 @@ def handler():
             success = add_serial_to_order(order_id, serial)
             if success:
                 sheet_result = log_to_google_sheet(product_name, serial, order_number, customer_name, order_date)
-                return jsonify({
-                    'status': 'success',
-                    'serial': serial,
-                    'order_number': order_number,
-                    'logged_to_sheet': sheet_result
-                }), 200
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({
+                        'status': 'success',
+                        'serial': serial,
+                        'order_number': order_number,
+                        'logged_to_sheet': sheet_result
+                    })
+                }
         
-        return jsonify({'error': 'Failed'}), 500
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': 'Failed'})
+        }
     except Exception as e:
         import traceback
-        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e), 'traceback': traceback.format_exc()})
+        }
