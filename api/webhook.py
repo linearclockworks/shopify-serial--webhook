@@ -94,12 +94,11 @@ def webhook():
     
     try:
         body = request.get_data()
-        hmac_header = (
-            request.headers.get('X-Shopify-Hmac-SHA256') or
-            request.headers.get('X-Shopify-Hmac-Sha256') or
-            request.headers.get('x-shopify-hmac-sha256') or
-            ''
-        )
+        hmac_header = request.headers.get('X-Shopify-Hmac-Sha256', '')
+        
+        if not verify_webhook(body, hmac_header):
+            print("Webhook verification failed")
+            return jsonify({'error': 'Unauthorized'}), 401
         print(f"HMAC Header: {hmac_header[:20]}..." if hmac_header else "No HMAC header found")
         print(f"Secret set: {bool(SHOPIFY_SECRET)}")
         
