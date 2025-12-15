@@ -6,6 +6,8 @@ import base64
 import os
 import urllib.request
 import urllib.error
+import gspread
+from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
@@ -13,6 +15,47 @@ app = Flask(__name__)
 SHOPIFY_SECRET = os.environ.get('SHOPIFY_API_SECRET', '')
 SHOPIFY_SHOP = os.environ.get('SHOPIFY_SHOP_NAME', '')
 SHOPIFY_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
+
+# Google Sheets config
+GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
+GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
+
+def get_google_sheet():
+    """Get Google Sheet client"""
+    try:
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        scopes = ['https://www.googleapis.com/auth/spreadsheets']
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        return sheet
+    except Exception as e:
+        print(f"Error connecting to Google Sheets: {e}")
+        return None
+
+def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
+    """Log serial number to Google Sheet"""
+    try:
+        sheet = get_google_sheet()
+        if not sheet:
+            print("Could not connect to Google Sheet")
+            return False
+        
+        # Check if headers exist
+        try:
+            first_cell = sheet.cell(1, 1).value
+            if not first_cell or first_cell != 'Serial Number':
+                sheet.insert_row(['Serial Number', 'Date', 'Product', 'Order Number', 'Customer'], 1)
+        except:
+            sheet.insert_row(['Serial Number', 'Date', 'Product', 'Order Number', 'Customer'], 1)
+        
+        # Append new row
+        sheet.append_row([serial, order_date, product_name, order_number, customer_name])
+        print(f"Logged to Google Sheet: {serial}")
+        return True
+    except Exception as e:
+        print(f"Error logging to Google Sheet: {e}")
+        return False
 
 def verify_webhook(data, hmac_header):
     """Verify webhook is from Shopify"""
@@ -106,14 +149,27 @@ def webhook():
         order_id = order_data.get('id')
         order_number = order_data.get('name', '')
         
+        # Get customer info
+        customer = order_data.get('customer', {})
+        customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        
+        # Get order date
+        from datetime import datetime
+        created_at = order_data.get('created_at', '')
+        try:
+            order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
         print(f"Processing order {order_number}")
         
         serials_generated = []
         for item in order_data.get('line_items', []):
+            product_title = item.get('title', '')
             sku = item.get('sku', '')
             quantity = item.get('quantity', 1)
             
-            print(f"Item SKU: {sku}")
+            print(f"Item: {product_title} (SKU: {sku})")
             
             if sku.startswith('LCK-'):
                 print(f"Generating {quantity} serial(s)")
@@ -122,6 +178,8 @@ def webhook():
                     if serial:
                         print(f"Generated: {serial}")
                         serials_generated.append(serial)
+                        # Log to Google Sheet
+                        log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
         
         if serials_generated:
             serial_text = ', '.join(serials_generated)
@@ -145,15 +203,35 @@ def test():
         return jsonify({'error': 'Missing order_id parameter. Use: /api/test?order_id=12345'}), 400
     
     try:
+        # Get order details for logging
+        result = shopify_api_call(f'orders/{order_id}.json')
+        if not result:
+            return jsonify({'error': 'Could not fetch order'}), 500
+        
+        order = result.get('order', {})
+        order_number = order.get('name', '')
+        customer = order.get('customer', {})
+        customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        
+        # Get first item for product name
+        line_items = order.get('line_items', [])
+        product_name = line_items[0].get('title', '') if line_items else 'Unknown'
+        
+        from datetime import datetime
+        order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
         serial, counter = get_next_serial()
         if serial:
             success = add_serial_to_order(order_id, serial)
             if success:
+                # Log to Google Sheet
+                log_to_google_sheet(product_name, serial, order_number, customer_name, order_date)
+                
                 return jsonify({
                     'status': 'success',
                     'serial': serial,
                     'order_id': order_id,
-                    'message': f'Added serial {serial} to order {order_id}'
+                    'message': f'Added serial {serial} to order {order_number}'
                 }), 200
             else:
                 return jsonify({'error': 'Failed to add serial to order'}), 500
