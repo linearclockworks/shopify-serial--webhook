@@ -34,29 +34,63 @@ def get_google_sheet():
         return None
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
-    """Log serial number to Google Sheet"""
+    """Log serial number to Google Sheet using existing structure"""
     try:
         sheet = get_google_sheet()
         if not sheet:
             print("Could not connect to Google Sheet")
             return False
         
-        # Check if headers exist
-        try:
-            first_cell = sheet.cell(1, 1).value
-            if not first_cell or first_cell != 'Serial Number':
-                sheet.insert_row(['Serial Number', 'Date', 'Product', 'Order Number', 'Customer'], 1)
-        except:
-            sheet.insert_row(['Serial Number', 'Date', 'Product', 'Order Number', 'Customer'], 1)
+        # Parse product name: "Wade: 5-foot Cherry / resin" 
+        # -> Name: "Wade", Description: "5-foot Cherry / resin"
+        if ':' in product_name:
+            name_part = product_name.split(':', 1)[0].strip()
+            description_part = product_name.split(':', 1)[1].strip()
+        else:
+            name_part = product_name
+            description_part = ''
         
-        # Append new row
-        sheet.append_row([serial, order_date, product_name, order_number, customer_name])
-        print(f"Logged to Google Sheet: {serial}")
+        # Your columns are: Serial, Name, Description, Avail, Order No, Bras tag description, 
+        # Pointer, Font, Special order?, order date, color, PCB ver, Lettering width, 
+        # Steps, Sled, Comments,, Quality, On website?, Location, Layout, Type, Speed steps/sec, Comments
+        
+        # We'll fill in: Serial, Name, Description, (skip Avail), Order No, (skip rest for now), order date
+        row = [
+            serial,           # Serial
+            name_part,        # Name
+            description_part, # Description
+            '',               # Avail
+            order_number,     # Order No
+            '',               # Bras tag description
+            '',               # Pointer
+            '',               # Font
+            '',               # Special order?
+            order_date,       # order date
+            '',               # color
+            '',               # PCB ver
+            '',               # Lettering width
+            '',               # Steps
+            '',               # Sled
+            '',               # Comments
+            '',               # (empty column)
+            '',               # Quality
+            '',               # On website?
+            '',               # Location
+            '',               # Layout
+            '',               # Type
+            '',               # Speed steps/sec
+            ''                # Comments
+        ]
+        
+        # Append new row (starting at row 2, after headers)
+        sheet.append_row(row)
+        print(f"Logged to Google Sheet: {serial} - {name_part}")
         return True
     except Exception as e:
         print(f"Error logging to Google Sheet: {e}")
+        import traceback
+        traceback.print_exc()
         return False
-
 def verify_webhook(data, hmac_header):
     """Verify webhook is from Shopify"""
     if not SHOPIFY_SECRET or not hmac_header:
