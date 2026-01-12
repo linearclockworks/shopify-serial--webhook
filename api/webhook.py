@@ -52,7 +52,9 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
     try:
         sheet = get_google_sheet()
         if not sheet:
+            print("Failed to get sheet")
             return False
+            
         if ':' in product_name:
             name_part = product_name.split(':', 1)[0].strip()
             description_part = product_name.split(':', 1)[1].strip()
@@ -60,10 +62,9 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             name_part = product_name
             description_part = ''
         
-        # Remove LCK- prefix for sheet (e.g., "LCK-1023" becomes "1023")
+        # Remove LCK- prefix for sheet
         serial_number_only = serial.replace('LCK-', '')
         
-        # Remove first two empty columns - start directly with Serial
         row = [
             serial_number_only,  # Serial
             name_part,           # Name
@@ -90,10 +91,15 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             '',                  # Speed steps/sec
             ''                   # Comments
         ]
+        
+        print(f"Appending row to sheet: {row[:5]}")
         sheet.append_row(row)
+        print("Successfully appended to sheet")
         return True
     except Exception as e:
         print(f"Log error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def verify_webhook(data, hmac_header):
@@ -172,7 +178,7 @@ def create_order_product(master_product, order_number, serial):
             'vendor': master_product.get('vendor', ''),
             'product_type': master_product.get('product_type', ''),
             'status': 'active',
-            'tags': '',  # No tags
+            'tags': '',
             'images': [],
             'variants': [{
                 'sku': serial,
@@ -204,7 +210,7 @@ def create_order_product(master_product, order_number, serial):
     new_product = result.get('product')
     print(f"Created product: {new_product['id']} - {new_product['title']}")
     
-    # Add metafields to the new product
+    # Add metafields
     product_id = new_product['id']
     metafields = [
         {
@@ -234,42 +240,37 @@ def create_order_product(master_product, order_number, serial):
     ]
     
     for mf_data in metafields:
-        mf_result = shopify_api_call(
+        shopify_api_call(
             f'products/{product_id}/metafields.json',
             method='POST',
             data={'metafield': mf_data}
         )
-        if not mf_result:
-            print(f"Warning: Failed to add metafield {mf_data['key']}")
     
     return new_product
 
 def update_order_line_item(order_id, line_item_id, new_product_id, new_variant_id):
     """Replace the line item with the new product"""
     
-    # First, get the current order to preserve other data
+    # Get the current order
     result = shopify_api_call(f'orders/{order_id}.json')
     if not result:
-        print("Failed to get order")
+        print("Failed to get order for line item update")
         return False
     
     order = result['order']
     
     # Find and update the line item
-    updated_line_items = []
     for item in order['line_items']:
         if item['id'] == line_item_id:
-            # Replace with new product
+            print(f"Updating line item {line_item_id} to product {new_product_id}")
             item['product_id'] = new_product_id
             item['variant_id'] = new_variant_id
-            print(f"Updated line item {line_item_id} to product {new_product_id}")
-        updated_line_items.append(item)
     
     # Update the order
     update_data = {
         'order': {
             'id': order_id,
-            'line_items': updated_line_items
+            'line_items': order['line_items']
         }
     }
     
@@ -293,14 +294,16 @@ def add_serial_to_order(order_id, serial):
 @app.route('/api/webhook', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
-        return 'Webhook handler is running', 200
+        return 'Webhook handler is running - v3', 200
     
     try:
         body = request.get_data()
         hmac_header = request.headers.get('X-Shopify-Hmac-Sha256', '')
         
-        # Skip verification for now
-        print("Processing webhook")
+        print("=" * 60)
+        print("WEBHOOK RECEIVED")
+        print("=" * 60)
+        
         order_data = json.loads(body)
         order_id = order_data.get('id')
         order_number = order_data.get('name', '')
@@ -317,9 +320,11 @@ def webhook():
         except:
             order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        print(f"Processing order {order_number}")
+        print(f"Processing order {order_number} (ID: {order_id})")
         
         serials_generated = []
+        products_created = []
+        
         for item in order_data.get('line_items', []):
             product_title = item.get('title', '')
             product_id = item.get('product_id')
@@ -327,149 +332,79 @@ def webhook():
             sku = item.get('sku', '')
             quantity = item.get('quantity', 1)
             
-            print(f"Item: {product_title} (SKU: {sku})")
+            print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
             
-            # Check if this is a master product that needs duplication
-            if sku.startswith('LCK-'):
-                print(f"Processing {quantity} clock(s)")
+            # Check if this is a clock product (SKU starts with LCK-)
+            if sku and sku.startswith('LCK-'):
+                print(f"✓ Clock product detected: {sku}")
                 
-                # Get the master product details
-                master_product = get_master_product(product_id)
-                if not master_product:
-                    print(f"Warning: Could not fetch master product {product_id}")
+                # Only process single quantity
+                if quantity != 1:
+                    print(f"⚠ Quantity {quantity} != 1, skipping product creation")
                     continue
                 
-                for i in range(quantity):
-                    # Generate serial
-                    serial, counter = get_next_serial()
-                    if not serial:
-                        print("Failed to generate serial")
-                        continue
+                # Get the master product details
+                print(f"Fetching master product {product_id}...")
+                master_product = get_master_product(product_id)
+                if not master_product:
+                    print(f"✗ Could not fetch master product {product_id}")
+                    continue
+                
+                print(f"✓ Master product: {master_product['title']}")
+                
+                # Generate serial
+                print("Generating serial...")
+                serial, counter = get_next_serial()
+                if not serial:
+                    print("✗ Failed to generate serial")
+                    continue
+                
+                print(f"✓ Generated serial: {serial}")
+                serials_generated.append(serial)
+                
+                # Create the order-specific product
+                print(f"Creating order product...")
+                new_product = create_order_product(master_product, order_number, serial)
+                
+                if new_product:
+                    print(f"✓ Created product: {new_product['id']} - {new_product['title']}")
+                    products_created.append({
+                        'id': new_product['id'],
+                        'title': new_product['title'],
+                        'serial': serial
+                    })
                     
-                    print(f"Generated: {serial}")
-                    serials_generated.append(serial)
-                    
-                    # Create the order-specific product
-                    new_product = create_order_product(master_product, order_number, serial)
-                    
-                    if new_product:
-                        # Update the line item to point to the new product
-                        # Note: This only works for single-quantity items
-                        # For multi-quantity, you'd need to split the line item
-                        if quantity == 1:
-                            new_variant_id = new_product['variants'][0]['id']
-                            update_order_line_item(order_id, line_item_id, new_product['id'], new_variant_id)
+                    # Update the line item
+                    print(f"Updating line item {line_item_id}...")
+                    new_variant_id = new_product['variants'][0]['id']
+                    updated = update_order_line_item(order_id, line_item_id, new_product['id'], new_variant_id)
+                    print(f"✓ Line item updated: {updated}")
                     
                     # Log to Google Sheet
-                    log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
+                    print("Logging to Google Sheet...")
+                    sheet_result = log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
+                    print(f"✓ Sheet logged: {sheet_result}")
+                else:
+                    print("✗ Failed to create product")
         
+        # Add serials to order notes
         if serials_generated:
             serial_text = ', '.join(serials_generated)
-            print(f"Adding to order: {serial_text}")
+            print(f"Adding serials to order notes: {serial_text}")
             add_serial_to_order(order_id, serial_text)
         
-        return jsonify({'status': 'success', 'serials': serials_generated}), 200
+        print("=" * 60)
+        print(f"WEBHOOK COMPLETE - {len(products_created)} products created")
+        print("=" * 60)
+        
+        return jsonify({
+            'status': 'success',
+            'serials': serials_generated,
+            'products_created': products_created
+        }), 200
         
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"ERROR: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/test', methods=['GET'])
-def test():
-    """Test endpoint - add serial to a specific order"""
-    order_id = request.args.get('order_id')
-    
-    if not order_id:
-        return jsonify({'error': 'Missing order_id parameter'}), 400
-    
-    try:
-        print(f"=== TEST ENDPOINT CALLED ===")
-        print(f"Order ID: {order_id}")
-        
-        # Get order details
-        result = shopify_api_call(f'orders/{order_id}.json')
-        if not result:
-            return jsonify({'error': 'Could not fetch order'}), 500
-        
-        order = result.get('order', {})
-        order_number = order.get('name', '')
-        customer = order.get('customer', {})
-        customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
-        
-        line_items = order.get('line_items', [])
-        if not line_items:
-            return jsonify({'error': 'No line items'}), 400
-            
-        first_item = line_items[0]
-        product_name = first_item.get('title', '')
-        product_id = first_item.get('product_id')
-        
-        from datetime import datetime
-        order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        print(f"Order: {order_number}, Product: {product_name}")
-        
-        # Get master product
-        master_product = get_master_product(product_id)
-        if not master_product:
-            return jsonify({'error': 'Could not fetch master product'}), 500
-        
-        # Generate serial
-        serial, counter = get_next_serial()
-        print(f"Generated serial: {serial}")
-        
-        if serial:
-            # Create order product
-            new_product = create_order_product(master_product, order_number, serial)
-            
-            if new_product:
-                # Add serial to order note
-                success = add_serial_to_order(order_id, serial)
-                print(f"Added to order: {success}")
-                
-                if success:
-                    # Log to Google Sheet
-                    sheet_result = log_to_google_sheet(product_name, serial, order_number, customer_name, order_date)
-                    print(f"Logged to sheet: {sheet_result}")
-                    
-                    return jsonify({
-                        'status': 'success',
-                        'serial': serial,
-                        'order_number': order_number,
-                        'new_product_id': new_product['id'],
-                        'logged_to_sheet': sheet_result
-                    }), 200
-        
-        return jsonify({'error': 'Failed'}), 500
-        
-    except Exception as e:
-        print(f"ERROR in test endpoint: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
-
-
-@app.route('/api/debug', methods=['GET'])
-def debug():
-    """Debug endpoint to check code version"""
-    return jsonify({
-        'version': '2025-01-12-v1',
-        'features': ['product_creation', 'line_item_update']
-    }), 200
-
-@app.route('/api/next-serial', methods=['GET'])
-def next_serial():
-    """Check what the next serial will be"""
-    try:
-        result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
-        if result and result.get('metafields'):
-            current = int(result['metafields'][0]['value'])
-            return jsonify({
-                'current_counter': current,
-                'next_serial': f'LCK-{current}'
-            }), 200
-        return jsonify({'error': 'Counter not found'}), 404
-    except Exception as e:
         return jsonify({'error': str(e)}), 500
