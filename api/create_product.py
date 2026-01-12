@@ -63,7 +63,7 @@ def shopify_api_call(endpoint, method='GET', data=None):
     req_data = json.dumps(data).encode('utf-8') if data else None
     req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:  # Changed from 30 to 60
             return json.loads(response.read().decode())
     except Exception as e:
         print(f"API Error: {e}")
