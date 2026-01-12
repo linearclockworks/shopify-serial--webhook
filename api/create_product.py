@@ -98,7 +98,7 @@ def find_master_product(style_name):
     found_products = 0
     
     while page <= 20:  # Max 5000 products
-        url = f'products.json?limit=250&page={page}&order=created_at DESC'
+        url = f'products.json?limit=250&page={page}&order=created_at%20DESC'
         result = shopify_api_call(url)
         
         if not result or not result.get('products') or len(result['products']) == 0:
