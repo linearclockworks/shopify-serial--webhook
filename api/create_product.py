@@ -123,7 +123,56 @@ def find_master_product(style_name):
     
     print(f"✗ No match found after scanning {found_products} products")
     return None
-    
+
+def publish_to_sales_channels(product_id):
+    """Publish product to Online Store and Shop sales channels"""
+    try:
+        # Get available publications (sales channels)
+        publications = shopify_api_call('publications.json')
+        
+        if not publications or not publications.get('publications'):
+            print("Could not fetch publications")
+            return False
+        
+        # Find Online Store and Shop channels
+        online_store_id = None
+        shop_id = None
+        
+        for pub in publications['publications']:
+            if pub['name'] == 'Online Store':
+                online_store_id = pub['id']
+            elif pub['name'] == 'Shop' or pub['name'] == 'Point of Sale':
+                shop_id = pub['id']
+        
+        print(f"Found channels - Online Store: {online_store_id}, Shop: {shop_id}")
+        
+        # Publish to each channel
+        success = True
+        for pub_id in [online_store_id, shop_id]:
+            if pub_id:
+                result = shopify_api_call(
+                    f'publications/{pub_id}/resource_feedbacks.json',
+                    method='POST',
+                    data={
+                        'resource_feedback': {
+                            'resource_id': product_id,
+                            'resource_type': 'Product',
+                            'feedback_generated_at': datetime.now().isoformat(),
+                            'state': 'success'
+                        }
+                    }
+                )
+                if result:
+                    print(f"Published to channel {pub_id}")
+                else:
+                    success = False
+        
+        return success
+        
+    except Exception as e:
+        print(f"Error publishing to channels: {e}")
+        return False
+            
 def create_available_product(master_product, serial):
     """Create a new available product (not tied to an order)"""
     
