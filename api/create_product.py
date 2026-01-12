@@ -176,14 +176,31 @@ def publish_to_sales_channels(product_id):
 def create_available_product(master_product, serial):
     """Create a new available product (not tied to an order)"""
     
+    # Create the new title - just add -- prefix, no "Available"
+    new_title = f"-- {master_product['title']}"
+    
+    # Use master's handle + serial for unique URL
+    serial_suffix = serial.replace('LCK-', '')  # Just the number
+    base_handle = master_product.get('handle', '')
+    if base_handle:
+        new_handle = f"{base_handle}-{serial_suffix}"
+    else:
+        # Fallback: generate from title
+        import re
+        new_handle = master_product['title'].lower()
+        new_handle = re.sub(r'[^a-z0-9]+', '-', new_handle)
+        new_handle = re.sub(r'-+', '-', new_handle).strip('-')
+        new_handle = f"{new_handle}-{serial_suffix}"
+    
     product_data = {
         'product': {
-            'title': f"-- {master_product['title']} - Available",
+            'title': new_title,
+            'handle': new_handle,
             'body_html': master_product.get('body_html', ''),
             'vendor': master_product.get('vendor', ''),
-            'product_type': master_product.get('product_type', ''),
-            'status': 'draft',  # Start as draft so you can customize
-            'tags': 'available',
+            'product_type': 'Wall Clocks',
+            'status': 'active',  # Active, not draft
+            'tags': '',
             'images': [],
             'variants': [{
                 'sku': serial,
@@ -197,7 +214,7 @@ def create_available_product(master_product, serial):
         }
     }
     
-    # Copy images
+    # Copy images (reuse URLs)
     for img in master_product.get('images', []):
         product_data['product']['images'].append({
             'src': img['src'],
