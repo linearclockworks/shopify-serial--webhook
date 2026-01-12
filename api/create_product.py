@@ -93,12 +93,12 @@ def find_master_product(style_name):
     
     print(f"Searching for: '{search_lower}'")
     
-    # Search newest first - will hit master products faster (only a few -- clones to skip)
+    # Paginate through products
     page = 1
     found_products = 0
     
-    while page <= 20:  # Max 5000 products
-        url = f'products.json?limit=250&page={page}&order=created_at%20DESC'
+    while page <= 20:  # Max 5000 products (250 * 20)
+        url = f'products.json?limit=250&page={page}'
         result = shopify_api_call(url)
         
         if not result or not result.get('products') or len(result['products']) == 0:
