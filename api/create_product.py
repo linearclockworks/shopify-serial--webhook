@@ -235,8 +235,8 @@ def create_available_product(master_product, serial):
         {
             'namespace': 'linear_clockworks',
             'key': 'master_product_id',
-            'type': 'product_reference',
-            'value': f"gid://shopify/Product/{master_product['id']}"
+            'type': 'number_integer',  # Store as simple number
+            'value': str(master_product['id'])
         },
         {
             'namespace': 'linear_clockworks',
@@ -259,11 +259,16 @@ def create_available_product(master_product, serial):
     ]
     
     for mf_data in metafields:
-        shopify_api_call(
+        print(f"Adding metafield: {mf_data['key']}")
+        result = shopify_api_call(
             f'products/{product_id}/metafields.json',
             method='POST',
             data={'metafield': mf_data}
         )
+        if result:
+            print(f"✓ Added metafield: {mf_data['key']}")
+        else:
+            print(f"✗ Failed to add metafield: {mf_data['key']}")
     
     return new_product
 
