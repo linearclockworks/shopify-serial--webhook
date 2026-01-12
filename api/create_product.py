@@ -93,28 +93,33 @@ def find_master_product(style_name):
     
     print(f"Searching for: '{search_lower}'")
     
-    # Paginate through products
-    page = 1
+    # Use since_id pagination (most reliable)
+    since_id = 0
     found_products = 0
+    max_products = 5000
     
-    while page <= 20:  # Max 5000 products (250 * 20)
-        url = f'products.json?limit=250&page={page}'
+    while found_products < max_products:
+        if since_id == 0:
+            url = f'products.json?limit=250'
+        else:
+            url = f'products.json?limit=250&since_id={since_id}'
+        
         result = shopify_api_call(url)
         
         if not result or not result.get('products') or len(result['products']) == 0:
             break
         
         found_products += len(result['products'])
-        print(f"Page {page}: scanned {found_products} total products")
+        print(f"Scanned {found_products} products...")
         
         for product in result['products']:
             title_lower = product['title'].lower()
-            # Skip -- products, find the master
             if title_lower.startswith(search_lower) and not product['title'].startswith('--'):
                 print(f"✓ MATCH: {product['title']}")
                 return product
         
-        page += 1
+        # Get last product ID for next page
+        since_id = result['products'][-1]['id']
     
     print(f"✗ No match found after scanning {found_products} products")
     return None
