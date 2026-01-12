@@ -176,7 +176,7 @@ def create_available_product(master_product, serial):
     
     return new_product
 
-@app.route('/api/create-product', methods=['GET'])
+@app.route('/api/create_product', methods=['GET'])
 def create_product():
     """
     Create a new available product from a master
