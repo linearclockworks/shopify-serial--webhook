@@ -87,29 +87,36 @@ def get_next_serial():
 
 def find_master_product(style_name):
     """Find master product by title using colon convention"""
-    # Add colon if not present
-    if ':' not in style_name:
-        search_term = f"{style_name}:"
-    else:
-        search_term = style_name
+    search_lower = style_name.lower().strip()
+    if not search_lower.endswith(':'):
+        search_lower += ':'
     
-    # Search using Shopify's search (more efficient than getting all products)
-    # URL encode the search term
-    import urllib.parse
-    encoded_term = urllib.parse.quote(search_term)
-    result = shopify_api_call(f'products.json?title={encoded_term}&limit=10')
+    print(f"Searching for: '{search_lower}'")
     
-    if not result or not result.get('products'):
-        print(f"No products found matching '{search_term}'")
-        return None
+    # Search newest first - will hit master products faster (only a few -- clones to skip)
+    page = 1
+    found_products = 0
     
-    # Find the one that doesn't start with --
-    for product in result['products']:
-        if not product['title'].startswith('--'):
-            print(f"Found master: {product['title']}")
-            return product
+    while page <= 20:  # Max 5000 products
+        url = f'products.json?limit=250&page={page}&order=created_at DESC'
+        result = shopify_api_call(url)
+        
+        if not result or not result.get('products') or len(result['products']) == 0:
+            break
+        
+        found_products += len(result['products'])
+        print(f"Page {page}: scanned {found_products} total products")
+        
+        for product in result['products']:
+            title_lower = product['title'].lower()
+            # Skip -- products, find the master
+            if title_lower.startswith(search_lower) and not product['title'].startswith('--'):
+                print(f"✓ MATCH: {product['title']}")
+                return product
+        
+        page += 1
     
-    print("No non-dash product found")
+    print(f"✗ No match found after scanning {found_products} products")
     return None
     
 def create_available_product(master_product, serial):
