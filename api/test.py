@@ -20,17 +20,23 @@ def get_google_sheet():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        
+        # Use the Clocks tab
         sheet = spreadsheet.worksheet('Clocks')
         return sheet
     except Exception as e:
         print(f"Sheet error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
     try:
         sheet = get_google_sheet()
         if not sheet:
+            print("Failed to get sheet")
             return False
+            
         if ':' in product_name:
             name_part = product_name.split(':', 1)[0].strip()
             description_part = product_name.split(':', 1)[1].strip()
@@ -44,10 +50,15 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             serial_number_only, name_part, description_part, '', order_number,
             '', '', '', '', order_date, '', '', '', '', '', '', '', '', '', '', '', '', ''
         ]
+        
+        print(f"Appending row to sheet: {row[:5]}")  # Debug
         sheet.append_row(row)
+        print("Successfully appended to sheet")
         return True
     except Exception as e:
         print(f"Log error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def shopify_api_call(endpoint, method='GET', data=None):
@@ -231,11 +242,12 @@ def test():
             success = add_serial_to_order(order_id, serial)
             print(f"Added to order notes: {success}")
             
+            # Log to sheet
+            print("Attempting to log to Google Sheet...")
+            sheet_result = log_to_google_sheet(product_name, serial, order_number, customer_name, order_date)
+            print(f"Sheet logging result: {sheet_result}")
+            
             if success:
-                # Log to sheet
-                sheet_result = log_to_google_sheet(product_name, serial, order_number, customer_name, order_date)
-                print(f"Logged to sheet: {sheet_result}")
-                
                 return jsonify({
                     'status': 'success',
                     'serial': serial,
@@ -252,4 +264,62 @@ def test():
         import traceback
         print(f"ERROR: {e}")
         traceback.print_exc()
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+@app.route('/api/next-serial', methods=['GET'])
+def next_serial():
+    """Check what the next serial will be"""
+    try:
+        result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
+        if result and result.get('metafields'):
+            current = int(result['metafields'][0]['value'])
+            return jsonify({
+                'current_counter': current,
+                'next_serial': f'LCK-{current}'
+            }), 200
+        return jsonify({'error': 'Counter not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/set-serial', methods=['GET'])
+def set_serial():
+    """Set the serial counter to a specific value"""
+    new_value = request.args.get('value')
+    
+    if not new_value:
+        return jsonify({'error': 'Missing value parameter. Usage: /api/set-serial?value=1018'}), 400
+    
+    try:
+        new_value = int(new_value)
+        
+        # Get the metafield
+        result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
+        if not result or not result.get('metafields'):
+            return jsonify({'error': 'Counter metafield not found'}), 404
+        
+        mf = result['metafields'][0]
+        metafield_id = mf['id']
+        
+        # Update it
+        update_data = {
+            'metafield': {
+                'id': metafield_id,
+                'value': str(new_value),
+                'type': 'number_integer'
+            }
+        }
+        
+        result = shopify_api_call(f'metafields/{metafield_id}.json', method='PUT', data=update_data)
+        
+        if result:
+            return jsonify({
+                'status': 'success',
+                'new_value': new_value,
+                'next_serial': f'LCK-{new_value}'
+            }), 200
+        else:
+            return jsonify({'error': 'Failed to update'}), 500
+            
+    except Exception as e:
+        import traceback
         return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
