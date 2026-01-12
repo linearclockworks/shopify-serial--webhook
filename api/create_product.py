@@ -86,19 +86,21 @@ def get_next_serial():
     return None, None
 
 def find_master_product(style_name):
-    """Find master product by title"""
-    # Search for products with this title
-    result = shopify_api_call(f'products.json?title={style_name}&limit=5')
+    """Find master product by title (partial match)"""
+    # Get all products and search locally
+    result = shopify_api_call(f'products.json?limit=250')
     if not result or not result.get('products'):
         return None
     
-    # Find the one that's NOT a -- product
+    # Find products that start with the style name and don't start with --
+    style_lower = style_name.lower()
     for product in result['products']:
-        if not product['title'].startswith('--'):
+        title_lower = product['title'].lower()
+        if title_lower.startswith(style_lower) and not product['title'].startswith('--'):
             return product
     
     return None
-
+    
 def create_available_product(master_product, serial):
     """Create a new available product (not tied to an order)"""
     
