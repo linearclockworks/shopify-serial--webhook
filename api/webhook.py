@@ -6,6 +6,7 @@ import base64
 import os
 import urllib.request
 import urllib.error
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -92,9 +93,10 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             ''                   # Comments
         ]
         
-        print(f"Appending row to sheet: {row[:5]}")
-        sheet.append_row(row)
-        print("Successfully appended to sheet")
+        print(f"Inserting row at top of sheet: {row[:5]}")
+        # Insert at row 2 (after header)
+        sheet.insert_row(row, index=2)
+        print("Successfully inserted to sheet")
         return True
     except Exception as e:
         print(f"Log error: {e}")
@@ -126,7 +128,7 @@ def shopify_api_call(endpoint, method='GET', data=None):
     req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
     
     try:
-        with urllib.request.urlopen(req, timeout=50) as response:
+        with urllib.request.urlopen(req, timeout=60) as response:
             return json.loads(response.read().decode())
     except Exception as e:
         print(f"API Error: {e}")
@@ -168,15 +170,82 @@ def get_master_product(product_id):
         return result.get('product')
     return None
 
+def publish_to_sales_channels(product_id):
+    """Publish product to Shop only (not Online Store) so it's hidden from search but available for orders"""
+    try:
+        # Get available publications (sales channels)
+        publications = shopify_api_call('publications.json')
+        
+        if not publications or not publications.get('publications'):
+            print("Could not fetch publications")
+            return False
+        
+        # Find Shop channel only (skip Online Store)
+        shop_id = None
+        
+        for pub in publications['publications']:
+            print(f"Found publication: {pub['name']} (ID: {pub['id']})")
+            if pub['name'] == 'Shop' or pub['name'] == 'Point of Sale':
+                shop_id = pub['id']
+        
+        print(f"Publishing to Shop channel: {shop_id}")
+        
+        # Publish to Shop only
+        if shop_id:
+            result = shopify_api_call(
+                f'publications/{shop_id}/resource_feedbacks.json',
+                method='POST',
+                data={
+                    'resource_feedback': {
+                        'resource_id': product_id,
+                        'resource_type': 'Product',
+                        'feedback_generated_at': datetime.now().isoformat(),
+                        'state': 'success'
+                    }
+                }
+            )
+            if result:
+                print(f"✓ Published to Shop channel")
+                return True
+            else:
+                print(f"✗ Failed to publish to Shop")
+                return False
+        else:
+            print("✗ Shop channel not found")
+            return False
+        
+    except Exception as e:
+        print(f"Error publishing to channels: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def create_order_product(master_product, order_number, serial):
     """Create a new order-specific product based on master template"""
     
+    # Create the new title with order number
+    new_title = f"-- {master_product['title']} - {order_number}"
+    
+    # Use master's handle + serial for unique URL
+    serial_suffix = serial.replace('LCK-', '')
+    base_handle = master_product.get('handle', '')
+    if base_handle:
+        new_handle = f"{base_handle}-{serial_suffix}"
+    else:
+        # Fallback: generate from title
+        import re
+        new_handle = master_product['title'].lower()
+        new_handle = re.sub(r'[^a-z0-9]+', '-', new_handle)
+        new_handle = re.sub(r'-+', '-', new_handle).strip('-')
+        new_handle = f"{new_handle}-{serial_suffix}"
+    
     product_data = {
         'product': {
-            'title': f"-- {master_product['title']} - {order_number}",
+            'title': new_title,
+            'handle': new_handle,
             'body_html': master_product.get('body_html', ''),
             'vendor': master_product.get('vendor', ''),
-            'product_type': master_product.get('product_type', ''),
+            'product_type': 'Wall Clocks',
             'status': 'active',
             'tags': '',
             'images': [],
@@ -216,14 +285,8 @@ def create_order_product(master_product, order_number, serial):
         {
             'namespace': 'linear_clockworks',
             'key': 'master_product_id',
-            'type': 'product_reference',
-            'value': f"gid://shopify/Product/{master_product['id']}"
-        },
-        {
-            'namespace': 'linear_clockworks',
-            'key': 'order_number',
-            'type': 'single_line_text_field',
-            'value': order_number
+            'type': 'number_integer',
+            'value': str(master_product['id'])
         },
         {
             'namespace': 'linear_clockworks',
@@ -235,47 +298,104 @@ def create_order_product(master_product, order_number, serial):
             'namespace': 'linear_clockworks',
             'key': 'is_order_product',
             'type': 'boolean',
-            'value': 'true'
+            'value': 'true'  # This is an order-specific product
+        },
+        {
+            'namespace': 'linear_clockworks',
+            'key': 'order_number',
+            'type': 'single_line_text_field',
+            'value': order_number
         }
     ]
     
     for mf_data in metafields:
-        shopify_api_call(
+        print(f"Adding metafield: {mf_data['key']}")
+        result = shopify_api_call(
             f'products/{product_id}/metafields.json',
             method='POST',
             data={'metafield': mf_data}
         )
+        if result:
+            print(f"✓ Added metafield: {mf_data['key']}")
+        else:
+            print(f"✗ Failed to add metafield: {mf_data['key']}")
+    
+    # Publish to Shop only (not Online Store)
+    print("Publishing to sales channels...")
+    publish_to_sales_channels(product_id)
     
     return new_product
 
-def update_order_line_item(order_id, line_item_id, new_product_id, new_variant_id):
-    """Replace the line item with the new product"""
-    
-    # Get the current order
-    result = shopify_api_call(f'orders/{order_id}.json')
-    if not result:
-        print("Failed to get order for line item update")
-        return False
-    
-    order = result['order']
-    
-    # Find and update the line item
-    for item in order['line_items']:
-        if item['id'] == line_item_id:
-            print(f"Updating line item {line_item_id} to product {new_product_id}")
-            item['product_id'] = new_product_id
-            item['variant_id'] = new_variant_id
-    
-    # Update the order
-    update_data = {
-        'order': {
-            'id': order_id,
-            'line_items': order['line_items']
+def replace_line_item_in_order(order_id, old_line_item_id, new_product_id, new_variant_id):
+    """Replace a line item using Shopify's Order Editing API"""
+    try:
+        print(f"Starting order edit for order {order_id}")
+        
+        # Step 1: Begin order edit
+        edit_data = {'order_edit': {}}
+        result = shopify_api_call(f'orders/{order_id}/order_edits.json', method='POST', data=edit_data)
+        
+        if not result or not result.get('order_edit'):
+            print("Failed to begin order edit")
+            return False
+        
+        order_edit_id = result['order_edit']['id']
+        print(f"✓ Order edit started: {order_edit_id}")
+        
+        # Step 2: Add new line item first (so order isn't empty)
+        print(f"Adding new product variant {new_variant_id}")
+        add_data = {
+            'line_item': {
+                'variant_id': new_variant_id,
+                'quantity': 1
+            }
         }
-    }
-    
-    result = shopify_api_call(f'orders/{order_id}.json', method='PUT', data=update_data)
-    return result is not None
+        result = shopify_api_call(
+            f'order_edits/{order_edit_id}/line_items.json',
+            method='POST',
+            data=add_data
+        )
+        
+        if not result:
+            print("Failed to add new line item")
+            return False
+        
+        print(f"✓ Added new line item")
+        
+        # Step 3: Remove old line item
+        print(f"Removing old line item {old_line_item_id}")
+        result = shopify_api_call(
+            f'order_edits/{order_edit_id}/line_items/{old_line_item_id}.json',
+            method='DELETE'
+        )
+        
+        print(f"✓ Removed old line item")
+        
+        # Step 4: Commit the edit
+        print("Committing order edit...")
+        commit_data = {
+            'order_edit': {
+                'notify_customer': False
+            }
+        }
+        result = shopify_api_call(
+            f'order_edits/{order_edit_id}/commit.json',
+            method='POST',
+            data=commit_data
+        )
+        
+        if result:
+            print(f"✓ Order edit committed successfully")
+            return True
+        else:
+            print("Failed to commit order edit")
+            return False
+        
+    except Exception as e:
+        print(f"Error in replace_line_item_in_order: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def add_serial_to_order(order_id, serial):
     """Add serial to order note"""
@@ -294,7 +414,7 @@ def add_serial_to_order(order_id, serial):
 @app.route('/api/webhook', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
-        return 'Webhook handler is running - v3', 200
+        return 'Webhook handler is running - v4', 200
     
     try:
         body = request.get_data()
@@ -313,7 +433,6 @@ def webhook():
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
         
         # Get order date
-        from datetime import datetime
         created_at = order_data.get('created_at', '')
         try:
             order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
@@ -375,11 +494,11 @@ def webhook():
                         'serial': serial
                     })
                     
-                    # Update the line item
-                    print(f"Updating line item {line_item_id}...")
+                    # Replace the line item in the order
+                    print(f"Replacing line item in order...")
                     new_variant_id = new_product['variants'][0]['id']
-                    updated = update_order_line_item(order_id, line_item_id, new_product['id'], new_variant_id)
-                    print(f"✓ Line item updated: {updated}")
+                    replaced = replace_line_item_in_order(order_id, line_item_id, new_product['id'], new_variant_id)
+                    print(f"✓ Line item replaced: {replaced}")
                     
                     # Log to Google Sheet
                     print("Logging to Google Sheet...")
