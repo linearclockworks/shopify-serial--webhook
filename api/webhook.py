@@ -455,7 +455,7 @@ def webhook():
             
             # Check if this is a clock product (SKU starts with LCK-) 
             # Skip products that start with -- (already processed)
-            if sku and sku.startswith('LCK-') and not product_title.startswith('--'):
+            if sku and sku.upper().startswith('LCK-') and not product_title.startswith('--'):
                 print(f"✓ Clock product detected: {sku}")
                 
                 # Only process single quantity
