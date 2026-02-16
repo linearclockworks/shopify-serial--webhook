@@ -132,29 +132,6 @@ def add_serial_to_order_note(order_id, serials):
         print(f"✗ Error adding note: {e}")
         return False
 
-def add_serial_to_line_item(order_id, line_item_id, serial):
-    """Attach serial number to line item"""
-    try:
-        metafield_data = {
-            'metafield': {
-                'namespace': 'linear_clockworks',
-                'key': 'serial_number',
-                'type': 'single_line_text_field',
-                'value': serial,
-                'owner_resource': 'line_item',
-                'owner_id': line_item_id
-            }
-        }
-        
-        result = shopify_api_call('metafields.json', method='POST', data=metafield_data)
-        
-        if result:
-            print(f"✓ Added serial to line item: {serial}")
-            return True
-        return False
-    except Exception as e:
-        print(f"✗ Error adding line item serial: {e}")
-        return False
 
 def process_webhook(order_data):
     """Process the webhook order data"""
@@ -197,9 +174,7 @@ def process_webhook(order_data):
             
             print(f"✓ Generated serial: {serial}")
             serials_assigned.append(serial)
-            
-            add_serial_to_line_item(order_id, line_item_id, serial)
-            
+                        
             print("Logging to Google Sheet...")
             log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
     
