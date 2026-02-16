@@ -1,4 +1,4 @@
-{{
+{
   "builds": [
     {
       "src": "api/webhook.py",
@@ -11,4 +11,3 @@
       "dest": "api/webhook.py"
     }
   ]
-}
