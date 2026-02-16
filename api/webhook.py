@@ -1,9 +1,10 @@
-#Summary: When a customer buys a clock on Shopify, this webhook automatically:
-#Assigns a unique serial number (LCK-####) from a global counter
-#Attaches that serial to the specific product in the order
-#Adds the serial to the order notes
-#Creates a new row in your Google Sheet for manufacturing trackingfrom flask import Flask, request, jsonify
+# Summary: When a customer buys a clock on Shopify, this webhook automatically:
+# Assigns a unique serial number (LCK-####) from a global counter
+# Attaches that serial to the specific product in the order
+# Adds the serial to the order notes
+# Creates a new row in your Google Sheet for manufacturing tracking
 
+from flask import Flask, request, jsonify
 import json
 import os
 import urllib.request
@@ -308,6 +309,6 @@ def webhook():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-# Run the Flask web server if this script is executed directly
-if __name__ == '__main__':
-    app.run(debug=True)
+# Expose Flask app for Vercel serverless functions
+# Vercel looks for a variable that can handle WSGI requests
+handler = app
