@@ -37,25 +37,17 @@ def get_google_sheet():
         print(f"Sheet error: {e}")
         return None
 
-def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
+def log_to_google_sheet(sku, serial, order_number, customer_name, order_date):
     """Add a new row to the CTClocks Google Sheet"""
     try:
         sheet = get_google_sheet()
         if not sheet:
             return False
         
-        # Split product name into name and description parts
-        if ':' in product_name:
-            name_part = product_name.split(':', 1)[0].strip()
-            description_part = product_name.split(':', 1)[1].strip()
-        else:
-            name_part = product_name
-            description_part = ''
-        
         # CTClocks sheet columns: A=Serial numb, B=SKU, C=Event tags?, D=Order number, E=customer, F=run length, G=steps, H=comments
         row = [
             serial,          # A: Serial numb (just the number)
-            name_part,       # B: SKU (product name)
+            sku,             # B: SKU (actual SKU like CT4024M)
             '',              # C: Event tags? (empty)
             order_number,    # D: Order number
             customer_name,   # E: customer
@@ -189,7 +181,7 @@ def process_webhook(order_data):
             serials_assigned.append(serial)
             
             print("Logging to CTClocks Google Sheet...")
-            log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
+            log_to_google_sheet(sku, serial, order_number, customer_name, order_date)
     
     if serials_assigned:
         add_serial_to_order_note(order_id, serials_assigned)
