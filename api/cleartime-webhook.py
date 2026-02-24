@@ -167,21 +167,19 @@ def process_webhook(order_data):
         if sku and is_cleartime and not product_title.startswith('--'):
             print(f"✓ Cleartime product detected: {sku}")
             
-            if quantity != 1:
-                print(f"⚠ Quantity {quantity} != 1, skipping")
-                continue
-            
-            print("Generating cleartime serial...")
-            serial = get_next_serial()
-            if not serial:
-                print("✗ Failed to generate serial")
-                continue
-            
-            print(f"✓ Generated serial: {serial}")
-            serials_assigned.append(serial)
-            
-            print("Logging to CTClocks Google Sheet...")
-            log_to_google_sheet(sku, serial, order_number, customer_name, order_date)
+            # Generate one serial per quantity
+            for i in range(quantity):
+                print(f"Generating cleartime serial {i+1} of {quantity}...")
+                serial = get_next_serial()
+                if not serial:
+                    print("✗ Failed to generate serial")
+                    continue
+                
+                print(f"✓ Generated serial: {serial}")
+                serials_assigned.append(serial)
+                
+                print("Logging to CTClocks Google Sheet...")
+                log_to_google_sheet(sku, serial, order_number, customer_name, order_date)
     
     if serials_assigned:
         add_serial_to_order_note(order_id, serials_assigned)
@@ -201,7 +199,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Cleartime webhook handler is running - v1')
+        self.wfile.write(b'Cleartime webhook handler is running - v2')
         return
     
     def do_POST(self):

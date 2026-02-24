@@ -12,6 +12,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 
 # Load configuration from environment variables
+# These are kept secret and not in the code itself
 SHOPIFY_SHOP = os.environ.get('SHOPIFY_SHOP_NAME', '')
 SHOPIFY_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
@@ -42,6 +43,8 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         if not sheet:
             return False
         
+        # Split product name into name and description parts
+        # Example: "Tide Clock: Custom Blue" becomes name="Tide Clock", description="Custom Blue"
         if ':' in product_name:
             name_part = product_name.split(':', 1)[0].strip()
             description_part = product_name.split(':', 1)[1].strip()
@@ -49,13 +52,40 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             name_part = product_name
             description_part = ''
         
+        # Remove "LCK-" prefix for cleaner serial numbers in the sheet
         serial_number_only = serial.replace('LCK-', '')
         
+        # Create a row with all the columns in the tracking sheet
+        # Most columns start empty and get filled in during manufacturing
         row = [
-            serial_number_only, name_part, description_part, '', order_number,
-            '', '', '', '', order_date, '', '', '', '', '', '', '', '', '', '', '', '', ''
+            serial_number_only,  # Serial
+            name_part,           # Name
+            description_part,    # Description
+            '',                  # Avail
+            order_number,        # Order No
+            '',                  # Bras tag description
+            '',                  # Pointer
+            '',                  # Font
+            '',                  # Special order?
+            order_date,          # order date
+            '',                  # color
+            '',                  # PCB ver
+            '',                  # Lettering width
+            '',                  # Steps
+            '',                  # Sled
+            '',                  # Comments
+            '',                  # (empty column)
+            '',                  # Quality
+            '',                  # On website?
+            '',                  # Location
+            '',                  # Layout
+            '',                  # Type
+            '',                  # Speed steps/sec
+            ''                   # Comments
         ]
         
+        # Insert the new row at position 2 (right after the header row)
+        # This keeps newest orders at the top
         sheet.insert_row(row, index=2)
         print(f"✓ Logged to sheet: {serial}")
         return True
@@ -64,13 +94,14 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         return False
 
 def shopify_api_call(endpoint, method='GET', data=None):
-    """Make API calls to Shopify"""
+    """Make API calls to Shopify to read or update order/product data"""
     url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2024-01/{endpoint}"
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_TOKEN,
         'Content-Type': 'application/json'
     }
     
+    # Convert data to JSON if we're sending any
     req_data = json.dumps(data).encode('utf-8') if data else None
     req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
     
@@ -82,7 +113,13 @@ def shopify_api_call(endpoint, method='GET', data=None):
         return None
 
 def get_next_serial():
-    """Get the next available serial number and increment the counter"""
+    """Get the next available serial number and increment the counter
+    
+    Uses a global counter stored in Shopify metafields. Each time this is called,
+    it reads the current number, returns it as a serial (LCK-####), and increments
+    the counter for next time.
+    """
+    # Read the current serial counter from Shopify
     result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
     
     if not result:
@@ -94,9 +131,12 @@ def get_next_serial():
         mf = metafields[0]
         current = int(mf['value'])
         metafield_id = mf['id']
+        
+        # Create the serial number with LCK- prefix
         serial = f"LCK-{current}"
         next_val = current + 1
         
+        # Increment the counter in Shopify for next time
         update_data = {
             'metafield': {
                 'id': metafield_id,
@@ -110,17 +150,26 @@ def get_next_serial():
     return None
 
 def add_serial_to_order_note(order_id, serials):
-    """Append serial numbers to order notes"""
+    """Append the serial numbers to the order's notes field
+    
+    This makes the serial numbers visible in Shopify's order details page
+    """
     try:
+        # Get the current order data
         result = shopify_api_call(f'orders/{order_id}.json')
         if not result:
             return False
         
         order = result.get('order', {})
         current_note = order.get('note', '') or ''
+        
+        # Format all serials as comma-separated list
         serial_text = ', '.join(serials)
+        
+        # Append to existing notes or create new note
         new_note = f"{current_note}\nSerial Numbers: {serial_text}" if current_note else f"Serial Numbers: {serial_text}"
         
+        # Update the order with new notes
         update_data = {'order': {'note': new_note}}
         result = shopify_api_call(f'orders/{order_id}.json', method='PUT', data=update_data)
         
@@ -131,7 +180,6 @@ def add_serial_to_order_note(order_id, serials):
     except Exception as e:
         print(f"✗ Error adding note: {e}")
         return False
-
 
 def process_webhook(order_data):
     """Process the webhook order data"""
@@ -151,6 +199,7 @@ def process_webhook(order_data):
     
     serials_assigned = []
     
+    # Loop through each product in the order
     for item in order_data.get('line_items', []):
         product_title = item.get('title', '')
         line_item_id = item.get('id')
@@ -159,25 +208,27 @@ def process_webhook(order_data):
         
         print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
         
+        # Only process clock products (SKU starts with LCK-)
+        # Skip products that have been manually marked as processed (start with --)
         if sku and sku.upper().startswith('LCK-') and not product_title.startswith('--'):
             print(f"✓ Clock product detected: {sku}")
             
-            if quantity != 1:
-                print(f"⚠ Quantity {quantity} != 1, skipping")
-                continue
-            
-            print("Generating serial...")
-            serial = get_next_serial()
-            if not serial:
-                print("✗ Failed to generate serial")
-                continue
-            
-            print(f"✓ Generated serial: {serial}")
-            serials_assigned.append(serial)
-                        
-            print("Logging to Google Sheet...")
-            log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
+            # Generate one serial per quantity
+            for i in range(quantity):
+                print(f"Generating serial {i+1} of {quantity}...")
+                serial = get_next_serial()
+                if not serial:
+                    print("✗ Failed to generate serial")
+                    continue
+                
+                print(f"✓ Generated serial: {serial}")
+                serials_assigned.append(serial)
+                
+                # Add a row to the Google Sheet for manufacturing tracking
+                print("Logging to Google Sheet...")
+                log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
     
+    # Add all generated serials to the order notes
     if serials_assigned:
         add_serial_to_order_note(order_id, serials_assigned)
     
