@@ -1,8 +1,8 @@
 # Summary: When a customer buys a clock on Shopify, this webhook automatically:
 # Assigns a unique serial number (LCK-####) from a global counter
-# Attaches that serial to the specific product in the order
 # Adds the serial to the order notes
 # Creates a new row in your Google Sheet for manufacturing tracking
+# Only processes products tagged "sample" (skips "featured" products that are already complete)
 
 import json
 import os
@@ -12,7 +12,6 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 
 # Load configuration from environment variables
-# These are kept secret and not in the code itself
 SHOPIFY_SHOP = os.environ.get('SHOPIFY_SHOP_NAME', '')
 SHOPIFY_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
@@ -44,7 +43,6 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
             return False
         
         # Split product name into name and description parts
-        # Example: "Tide Clock: Custom Blue" becomes name="Tide Clock", description="Custom Blue"
         if ':' in product_name:
             name_part = product_name.split(':', 1)[0].strip()
             description_part = product_name.split(':', 1)[1].strip()
@@ -56,7 +54,6 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         serial_number_only = serial.replace('LCK-', '')
         
         # Create a row with all the columns in the tracking sheet
-        # Most columns start empty and get filled in during manufacturing
         row = [
             serial_number_only,  # Serial
             name_part,           # Name
@@ -85,7 +82,6 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         ]
         
         # Insert the new row at position 2 (right after the header row)
-        # This keeps newest orders at the top
         sheet.insert_row(row, index=2)
         print(f"✓ Logged to sheet: {serial}")
         return True
@@ -101,7 +97,6 @@ def shopify_api_call(endpoint, method='GET', data=None):
         'Content-Type': 'application/json'
     }
     
-    # Convert data to JSON if we're sending any
     req_data = json.dumps(data).encode('utf-8') if data else None
     req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
     
@@ -113,13 +108,7 @@ def shopify_api_call(endpoint, method='GET', data=None):
         return None
 
 def get_next_serial():
-    """Get the next available serial number and increment the counter
-    
-    Uses a global counter stored in Shopify metafields. Each time this is called,
-    it reads the current number, returns it as a serial (LCK-####), and increments
-    the counter for next time.
-    """
-    # Read the current serial counter from Shopify
+    """Get the next available serial number and increment the counter"""
     result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
     
     if not result:
@@ -132,11 +121,9 @@ def get_next_serial():
         current = int(mf['value'])
         metafield_id = mf['id']
         
-        # Create the serial number with LCK- prefix
         serial = f"LCK-{current}"
         next_val = current + 1
         
-        # Increment the counter in Shopify for next time
         update_data = {
             'metafield': {
                 'id': metafield_id,
@@ -150,26 +137,17 @@ def get_next_serial():
     return None
 
 def add_serial_to_order_note(order_id, serials):
-    """Append the serial numbers to the order's notes field
-    
-    This makes the serial numbers visible in Shopify's order details page
-    """
+    """Append the serial numbers to the order's notes field"""
     try:
-        # Get the current order data
         result = shopify_api_call(f'orders/{order_id}.json')
         if not result:
             return False
         
         order = result.get('order', {})
         current_note = order.get('note', '') or ''
-        
-        # Format all serials as comma-separated list
         serial_text = ', '.join(serials)
-        
-        # Append to existing notes or create new note
         new_note = f"{current_note}\nSerial Numbers: {serial_text}" if current_note else f"Serial Numbers: {serial_text}"
         
-        # Update the order with new notes
         update_data = {'order': {'note': new_note}}
         result = shopify_api_call(f'orders/{order_id}.json', method='PUT', data=update_data)
         
@@ -205,13 +183,37 @@ def process_webhook(order_data):
         line_item_id = item.get('id')
         sku = item.get('sku', '')
         quantity = item.get('quantity', 1)
+        product_id = item.get('product_id')
         
         print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
         
         # Only process clock products (SKU starts with LCK-)
-        # Skip products that have been manually marked as processed (start with --)
-        if sku and sku.upper().startswith('LCK-') and not product_title.startswith('--'):
+        if sku and sku.upper().startswith('LCK-'):
             print(f"✓ Clock product detected: {sku}")
+            
+            # Check product tags - only process if tagged "sample"
+            # Skip if tagged "featured" (already completed/ready to ship)
+            product_result = shopify_api_call(f'products/{product_id}.json')
+            if product_result:
+                tags = product_result.get('product', {}).get('tags', '')
+                tags_list = [tag.strip().lower() for tag in tags.split(',')]
+                
+                if 'featured' in tags_list and 'sample' in tags_list:
+                    print(f"⚠️ WARNING: Product has BOTH 'featured' and 'sample' tags - skipping")
+                    continue
+                
+                if 'featured' in tags_list:
+                    print(f"⏭️ Skipping - product tagged 'featured' (already completed)")
+                    continue
+                
+                if 'sample' not in tags_list:
+                    print(f"⏭️ Skipping - product not tagged 'sample' (doesn't need manufacturing)")
+                    continue
+                
+                print(f"✓ Product tagged 'sample' - needs manufacturing")
+            else:
+                print(f"⚠️ Could not fetch product tags - skipping for safety")
+                continue
             
             # Generate one serial per quantity
             for i in range(quantity):
@@ -247,7 +249,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Webhook handler is running - v6 (Vercel native)')
+        self.wfile.write(b'Webhook handler is running - v7 (tag-based filtering)')
         return
     
     def do_POST(self):
