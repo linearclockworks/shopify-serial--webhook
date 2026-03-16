@@ -92,7 +92,7 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
 
 def shopify_api_call(endpoint, method='GET', data=None):
     """Make API calls to Shopify to read or update order/product data"""
-    url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2024-01/{endpoint}"
+    url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2026-01/{endpoint}"
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_TOKEN,
         'Content-Type': 'application/json'
