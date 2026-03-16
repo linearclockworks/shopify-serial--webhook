@@ -4,7 +4,7 @@
 # 3. Copies photos, description, price from sample product
 # 4. Logs to Clocksheet with hyperlink to new product
 # 5. Adds serial number to order notes
-# 6. Prevents duplicate processing with idempotency check
+# 6. Prevents duplicate processing with atomic locking
 
 import json
 import os
@@ -245,24 +245,64 @@ def add_serial_to_order_note(order_id, serial):
         print(f"✗ Error adding serial to notes: {e}")
         return False
 
-def mark_order_as_processed(order_id):
-    """Mark order as processed to prevent duplicate webhook runs"""
+def try_acquire_processing_lock(order_id):
+    """
+    Atomic lock: Try to mark order as being processed.
+    Returns True if lock acquired (we can process), False if already locked.
+    """
     try:
-        processed_data = {
+        # Check if processing lock already exists
+        result = shopify_api_call(f'orders/{order_id}/metafields.json?namespace=webhook&key=processing_lock')
+        
+        if result and result.get('metafields'):
+            # Lock already exists - another instance is processing
+            existing_lock = result['metafields'][0]
+            lock_time = existing_lock.get('value', '')
+            print(f"⏭️ Processing lock exists (created at {lock_time}) - skipping")
+            return False
+        
+        # No lock exists - try to create it
+        lock_data = {
             'metafield': {
                 'namespace': 'webhook',
-                'key': 'processed',
-                'value': 'true',
-                'type': 'boolean'
+                'key': 'processing_lock',
+                'value': datetime.now().isoformat(),
+                'type': 'single_line_text_field'
             }
         }
-        result = shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data=processed_data)
+        
+        result = shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data=lock_data)
+        
         if result:
-            print(f"✓ Marked order as processed")
+            print(f"✓ Acquired processing lock")
+            return True
+        else:
+            print(f"✗ Failed to acquire lock")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Error checking/acquiring lock: {e}")
+        # If we can't determine lock status, err on the side of caution and don't process
+        return False
+
+def mark_order_as_completed(order_id):
+    """Mark order processing as completed"""
+    try:
+        completed_data = {
+            'metafield': {
+                'namespace': 'webhook',
+                'key': 'processing_completed',
+                'value': datetime.now().isoformat(),
+                'type': 'single_line_text_field'
+            }
+        }
+        result = shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data=completed_data)
+        if result:
+            print(f"✓ Marked order as completed")
             return True
         return False
     except Exception as e:
-        print(f"✗ Error marking order as processed: {e}")
+        print(f"✗ Error marking as completed: {e}")
         return False
 
 def process_webhook(order_data):
@@ -270,109 +310,115 @@ def process_webhook(order_data):
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
     
-    # IDEMPOTENCY CHECK: Has this order already been processed?
-    result = shopify_api_call(f'orders/{order_id}/metafields.json?namespace=webhook&key=processed')
-    if result and result.get('metafields'):
-        print(f"⏭️ Order {order_number} already processed - skipping to prevent duplicates")
+    # ATOMIC LOCK: Try to acquire processing lock - prevents race conditions
+    if not try_acquire_processing_lock(order_id):
         return {
-            'status': 'already_processed',
+            'status': 'already_processing',
             'order': order_number,
-            'message': 'Order was already processed'
+            'message': 'Order is already being processed by another webhook instance'
         }
     
-    customer = order_data.get('customer', {})
-    customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
-    
-    created_at = order_data.get('created_at', '')
     try:
-        order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
-    except:
-        order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    print(f"Processing order {order_number} (ID: {order_id})")
-    
-    products_created = []
-    serials_assigned = []
-    
-    # Loop through each product in the order
-    for item in order_data.get('line_items', []):
-        product_title = item.get('title', '')
-        line_item_id = item.get('id')
-        sku = item.get('sku', '')
-        quantity = item.get('quantity', 1)
-        product_id = item.get('product_id')
+        customer = order_data.get('customer', {})
+        customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
         
-        print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
+        created_at = order_data.get('created_at', '')
+        try:
+            order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Only process clock products (SKU starts with LCK-)
-        if sku and sku.upper().startswith('LCK-'):
-            print(f"✓ Clock product detected: {sku}")
+        print(f"Processing order {order_number} (ID: {order_id})")
+        
+        products_created = []
+        serials_assigned = []
+        
+        # Loop through each product in the order
+        for item in order_data.get('line_items', []):
+            product_title = item.get('title', '')
+            line_item_id = item.get('id')
+            sku = item.get('sku', '')
+            quantity = item.get('quantity', 1)
+            product_id = item.get('product_id')
             
-            # Check product tags - only process if tagged "sample"
-            product_result = shopify_api_call(f'products/{product_id}.json')
-            if product_result:
-                tags = product_result.get('product', {}).get('tags', '')
-                tags_list = [tag.strip().lower() for tag in tags.split(',')]
-                
-                if 'featured' in tags_list and 'sample' in tags_list:
-                    print(f"⚠️ WARNING: Product has BOTH 'featured' and 'sample' tags - skipping")
-                    continue
-                
-                if 'featured' in tags_list:
-                    print(f"⏭️ Skipping - product tagged 'featured' (already completed)")
-                    continue
-                
-                if 'sample' not in tags_list:
-                    print(f"⏭️ Skipping - product not tagged 'sample' (doesn't need manufacturing)")
-                    continue
-                
-                print(f"✓ Product tagged 'sample' - creating individual product")
-            else:
-                print(f"⚠️ Could not fetch product tags - skipping for safety")
-                continue
+            print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
             
-            # Process each quantity as separate product
-            for i in range(quantity):
-                print(f"Processing item {i+1} of {quantity}...")
+            # Only process clock products (SKU starts with LCK-)
+            if sku and sku.upper().startswith('LCK-'):
+                print(f"✓ Clock product detected: {sku}")
                 
-                # Generate serial number
-                serial = get_next_serial()
-                if not serial:
-                    print("✗ Failed to generate serial")
+                # Check product tags - only process if tagged "sample"
+                product_result = shopify_api_call(f'products/{product_id}.json')
+                if product_result:
+                    tags = product_result.get('product', {}).get('tags', '')
+                    tags_list = [tag.strip().lower() for tag in tags.split(',')]
+                    
+                    if 'featured' in tags_list and 'sample' in tags_list:
+                        print(f"⚠️ WARNING: Product has BOTH 'featured' and 'sample' tags - skipping")
+                        continue
+                    
+                    if 'featured' in tags_list:
+                        print(f"⏭️ Skipping - product tagged 'featured' (already completed)")
+                        continue
+                    
+                    if 'sample' not in tags_list:
+                        print(f"⏭️ Skipping - product not tagged 'sample' (doesn't need manufacturing)")
+                        continue
+                    
+                    print(f"✓ Product tagged 'sample' - creating individual product")
+                else:
+                    print(f"⚠️ Could not fetch product tags - skipping for safety")
                     continue
                 
-                print(f"✓ Generated serial: {serial}")
-                serials_assigned.append(serial)
-                
-                # Create new product based on sample
-                new_product = create_product_from_sample(product_id, serial)
-                
-                if not new_product:
-                    print("✗ Failed to create product")
-                    continue
-                
-                products_created.append(new_product['title'])
-                
-                # Log to Google Sheet with hyperlink to new product
-                print("Logging to Google Sheet...")
-                log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
-    
-    # Add all serial numbers to order notes
-    if serials_assigned:
-        for serial in serials_assigned:
-            add_serial_to_order_note(order_id, serial)
-    
-    # Mark order as processed to prevent duplicate runs
-    mark_order_as_processed(order_id)
-    
-    print(f"WEBHOOK COMPLETE - {len(products_created)} products created")
-    
-    return {
-        'status': 'success',
-        'products': products_created,
-        'serials': serials_assigned,
-        'order': order_number
-    }
+                # Process each quantity as separate product
+                for i in range(quantity):
+                    print(f"Processing item {i+1} of {quantity}...")
+                    
+                    # Generate serial number
+                    serial = get_next_serial()
+                    if not serial:
+                        print("✗ Failed to generate serial")
+                        continue
+                    
+                    print(f"✓ Generated serial: {serial}")
+                    serials_assigned.append(serial)
+                    
+                    # Create new product based on sample
+                    new_product = create_product_from_sample(product_id, serial)
+                    
+                    if not new_product:
+                        print("✗ Failed to create product")
+                        continue
+                    
+                    products_created.append(new_product['title'])
+                    
+                    # Log to Google Sheet with hyperlink to new product
+                    print("Logging to Google Sheet...")
+                    log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
+        
+        # Add all serial numbers to order notes
+        if serials_assigned:
+            for serial in serials_assigned:
+                add_serial_to_order_note(order_id, serial)
+        
+        # Mark order processing as completed
+        mark_order_as_completed(order_id)
+        
+        print(f"WEBHOOK COMPLETE - {len(products_created)} products created")
+        
+        return {
+            'status': 'success',
+            'products': products_created,
+            'serials': serials_assigned,
+            'order': order_number
+        }
+        
+    except Exception as e:
+        # If processing fails, the lock will remain but that's okay - prevents retry loops
+        print(f"ERROR during processing: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 class handler(BaseHTTPRequestHandler):
     """Vercel serverless function handler"""
@@ -381,7 +427,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Webhook handler is running - v10 (hyperlinks + order notes)')
+        self.wfile.write(b'Webhook handler is running - v11 (atomic locking)')
         return
     
     def do_POST(self):
