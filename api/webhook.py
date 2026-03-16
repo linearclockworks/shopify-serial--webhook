@@ -2,8 +2,8 @@
 # 1. Generates a unique serial number (LCK-####)
 # 2. Creates a new Shopify product with serial in name (e.g., "Elena-1028")
 # 3. Copies photos, description, price from sample product
-# 4. Replaces sample product in order with new product
-# 5. Logs to Clocksheet for manufacturing tracking
+# 4. Logs to Clocksheet with hyperlink to new product
+# 5. Adds serial number to order notes
 # 6. Prevents duplicate processing with idempotency check
 
 import json
@@ -37,14 +37,14 @@ def get_google_sheet():
         print(f"Sheet error: {e}")
         return None
 
-def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date):
+def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date, product_id):
     """Add a new row to the Google Sheet with the clock's serial number and order details"""
     try:
         sheet = get_google_sheet()
         if not sheet:
             return False
         
-        # Split product name into name and description parts
+        # Use the new product name (e.g., "Claret-1051") instead of original
         if ':' in product_name:
             name_part = product_name.split(':', 1)[0].strip()
             description_part = product_name.split(':', 1)[1].strip()
@@ -55,10 +55,13 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         # Remove "LCK-" prefix for cleaner serial numbers in the sheet
         serial_number_only = serial.replace('LCK-', '')
         
+        # Create Shopify admin product URL
+        product_url = f"https://admin.shopify.com/store/{SHOPIFY_SHOP}/products/{product_id}"
+        
         # Create a row with all the columns in the tracking sheet
         row = [
             serial_number_only,  # Serial
-            name_part,           # Name
+            name_part,           # Name (will be updated with hyperlink)
             description_part,    # Description
             '',                  # Avail
             order_number,        # Order No
@@ -85,7 +88,15 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         
         # Insert the new row at position 2 (right after the header row)
         sheet.insert_row(row, index=2)
-        print(f"✓ Logged to sheet: {serial}")
+        
+        # Add hyperlink to the Name cell (column B, row 2)
+        try:
+            # Update cell B2 with hyperlink formula
+            sheet.update_cell(2, 2, f'=HYPERLINK("{product_url}", "{name_part}")')
+            print(f"✓ Logged to sheet with hyperlink: {serial}")
+        except Exception as e:
+            print(f"⚠️ Logged to sheet but hyperlink failed: {e}")
+        
         return True
     except Exception as e:
         print(f"✗ Sheet error: {e}")
@@ -210,57 +221,28 @@ def create_product_from_sample(sample_product_id, serial):
         traceback.print_exc()
         return None
 
-def update_order_line_items(order_id, old_line_item_id, new_variant_id, quantity):
-    """Replace sample product line item with new product in the order"""
+def add_serial_to_order_note(order_id, serial):
+    """Add serial number to order notes"""
     try:
-        # First, let's try a simpler approach: directly update the order's line items
-        # Get current order
         result = shopify_api_call(f'orders/{order_id}.json')
         if not result:
             return False
         
         order = result.get('order', {})
-        line_items = order.get('line_items', [])
+        current_note = order.get('note', '') or ''
         
-        # Build new line items array
-        new_line_items = []
-        for item in line_items:
-            if item['id'] == old_line_item_id:
-                # Replace with new product
-                new_line_items.append({
-                    'variant_id': new_variant_id,
-                    'quantity': quantity,
-                    'price': item.get('price')
-                })
-            else:
-                # Keep existing items
-                new_line_items.append({
-                    'id': item['id'],
-                    'variant_id': item.get('variant_id'),
-                    'quantity': item['quantity']
-                })
+        note_addition = f"\nSerial Number: {serial}"
+        new_note = f"{current_note}{note_addition}" if current_note else note_addition.strip()
         
-        # Try to update the order
-        update_data = {
-            'order': {
-                'id': order_id,
-                'line_items': new_line_items
-            }
-        }
-        
+        update_data = {'order': {'note': new_note}}
         result = shopify_api_call(f'orders/{order_id}.json', method='PUT', data=update_data)
         
         if result:
-            print(f"✓ Updated order line items")
+            print(f"✓ Added serial to order notes: {serial}")
             return True
-        else:
-            print(f"✗ Failed to update order")
-            return False
-            
+        return False
     except Exception as e:
-        print(f"✗ Error updating order: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"✗ Error adding serial to notes: {e}")
         return False
 
 def mark_order_as_processed(order_id):
@@ -310,6 +292,7 @@ def process_webhook(order_data):
     print(f"Processing order {order_number} (ID: {order_id})")
     
     products_created = []
+    serials_assigned = []
     
     # Loop through each product in the order
     for item in order_data.get('line_items', []):
@@ -359,6 +342,7 @@ def process_webhook(order_data):
                     continue
                 
                 print(f"✓ Generated serial: {serial}")
+                serials_assigned.append(serial)
                 
                 # Create new product based on sample
                 new_product = create_product_from_sample(product_id, serial)
@@ -369,13 +353,14 @@ def process_webhook(order_data):
                 
                 products_created.append(new_product['title'])
                 
-                # Update order: remove sample, add new product
-                print("Updating order line items...")
-                update_order_line_items(order_id, line_item_id, new_product['variant_id'], 1)
-                
-                # Log to Google Sheet
+                # Log to Google Sheet with hyperlink to new product
                 print("Logging to Google Sheet...")
-                log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
+                log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
+    
+    # Add all serial numbers to order notes
+    if serials_assigned:
+        for serial in serials_assigned:
+            add_serial_to_order_note(order_id, serial)
     
     # Mark order as processed to prevent duplicate runs
     mark_order_as_processed(order_id)
@@ -385,6 +370,7 @@ def process_webhook(order_data):
     return {
         'status': 'success',
         'products': products_created,
+        'serials': serials_assigned,
         'order': order_number
     }
 
@@ -395,7 +381,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Webhook handler is running - v9 (with idempotency protection)')
+        self.wfile.write(b'Webhook handler is running - v10 (hyperlinks + order notes)')
         return
     
     def do_POST(self):
