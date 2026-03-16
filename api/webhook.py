@@ -4,6 +4,7 @@
 # 3. Copies photos, description, price from sample product
 # 4. Replaces sample product in order with new product
 # 5. Logs to Clocksheet for manufacturing tracking
+# 6. Prevents duplicate processing with idempotency check
 
 import json
 import os
@@ -285,10 +286,40 @@ def update_order_line_items(order_id, old_line_item_id, new_variant_id, quantity
         traceback.print_exc()
         return False
 
+def mark_order_as_processed(order_id):
+    """Mark order as processed to prevent duplicate webhook runs"""
+    try:
+        processed_data = {
+            'metafield': {
+                'namespace': 'webhook',
+                'key': 'processed',
+                'value': 'true',
+                'type': 'boolean'
+            }
+        }
+        result = shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data=processed_data)
+        if result:
+            print(f"✓ Marked order as processed")
+            return True
+        return False
+    except Exception as e:
+        print(f"✗ Error marking order as processed: {e}")
+        return False
+
 def process_webhook(order_data):
     """Process the webhook order data"""
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
+    
+    # IDEMPOTENCY CHECK: Has this order already been processed?
+    result = shopify_api_call(f'orders/{order_id}/metafields.json?namespace=webhook&key=processed')
+    if result and result.get('metafields'):
+        print(f"⏭️ Order {order_number} already processed - skipping to prevent duplicates")
+        return {
+            'status': 'already_processed',
+            'order': order_number,
+            'message': 'Order was already processed'
+        }
     
     customer = order_data.get('customer', {})
     customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
@@ -369,6 +400,9 @@ def process_webhook(order_data):
                 print("Logging to Google Sheet...")
                 log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
     
+    # Mark order as processed to prevent duplicate runs
+    mark_order_as_processed(order_id)
+    
     print(f"WEBHOOK COMPLETE - {len(products_created)} products created")
     
     return {
@@ -384,7 +418,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Webhook handler is running - v8 (product creation + order editing)')
+        self.wfile.write(b'Webhook handler is running - v9 (with idempotency protection)')
         return
     
     def do_POST(self):
