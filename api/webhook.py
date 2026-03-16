@@ -1,8 +1,9 @@
-# Summary: When a customer buys a clock on Shopify, this webhook automatically:
-# Assigns a unique serial number (LCK-####) from a global counter
-# Adds the serial to the order notes
-# Creates a new row in your Google Sheet for manufacturing tracking
-# Only processes products tagged "sample" (skips "featured" products that are already complete)
+# Summary: When a customer orders a "sample" tagged clock, this webhook automatically:
+# 1. Generates a unique serial number (LCK-####)
+# 2. Creates a new Shopify product with serial in name (e.g., "Elena-1028")
+# 3. Copies photos, description, price from sample product
+# 4. Replaces sample product in order with new product
+# 5. Logs to Clocksheet for manufacturing tracking
 
 import json
 import os
@@ -136,27 +137,152 @@ def get_next_serial():
     
     return None
 
-def add_serial_to_order_note(order_id, serials):
-    """Append the serial numbers to the order's notes field"""
+def create_product_from_sample(sample_product_id, serial):
+    """Create a new product based on the sample product with serial in name"""
     try:
-        result = shopify_api_call(f'orders/{order_id}.json')
+        # Get the sample product details
+        result = shopify_api_call(f'products/{sample_product_id}.json')
         if not result:
+            print(f"✗ Could not fetch sample product {sample_product_id}")
+            return None
+        
+        sample = result.get('product', {})
+        
+        # Sample products never have serials in name
+        base_title = sample.get('title', '')
+        
+        # Create new product title with serial
+        serial_only = serial.replace('LCK-', '')
+        new_title = f"{base_title}-{serial_only}"
+        
+        # Get images - just reference the same URLs, don't duplicate
+        images = []
+        for img in sample.get('images', []):
+            images.append({
+                'src': img.get('src')
+            })
+        
+        # Get first variant for price
+        variants = sample.get('variants', [])
+        price = variants[0].get('price') if variants else '0.00'
+        
+        # Create new product data
+        new_product = {
+            'product': {
+                'title': new_title,
+                'body_html': sample.get('body_html', ''),
+                'vendor': sample.get('vendor', ''),
+                'product_type': 'Wall Clocks',
+                'status': 'active',
+                'published': True,
+                'images': images,
+                'variants': [
+                    {
+                        'price': price,
+                        'sku': serial,
+                        'inventory_management': 'shopify',
+                        'inventory_quantity': 1
+                    }
+                ]
+            }
+        }
+        
+        # Create the new product
+        result = shopify_api_call('products.json', method='POST', data=new_product)
+        
+        if result and result.get('product'):
+            new_product_id = result['product']['id']
+            new_variant_id = result['product']['variants'][0]['id']
+            print(f"✓ Created new product: {new_title} (ID: {new_product_id})")
+            return {
+                'product_id': new_product_id,
+                'variant_id': new_variant_id,
+                'title': new_title
+            }
+        else:
+            print(f"✗ Failed to create product")
+            return None
+            
+    except Exception as e:
+        print(f"✗ Error creating product: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def update_order_line_items(order_id, old_line_item_id, new_variant_id, quantity):
+    """Replace sample product line item with new product in the order"""
+    try:
+        # Use Order Edit API to modify the order
+        # Step 1: Create an order edit
+        edit_data = {
+            'order_edit': {}
+        }
+        result = shopify_api_call(f'orders/{order_id}/order_edits.json', method='POST', data=edit_data)
+        
+        if not result or not result.get('order_edit'):
+            print(f"✗ Failed to create order edit")
             return False
         
-        order = result.get('order', {})
-        current_note = order.get('note', '') or ''
-        serial_text = ', '.join(serials)
-        new_note = f"{current_note}\nSerial Numbers: {serial_text}" if current_note else f"Serial Numbers: {serial_text}"
+        order_edit_id = result['order_edit']['id']
+        calculated_order_id = result['order_edit']['calculated_order']['id']
         
-        update_data = {'order': {'note': new_note}}
-        result = shopify_api_call(f'orders/{order_id}.json', method='PUT', data=update_data)
+        print(f"✓ Created order edit: {order_edit_id}")
+        
+        # Step 2: Remove old line item
+        remove_data = {
+            'line_item': {
+                'id': old_line_item_id,
+                'quantity': 0  # Set to 0 to remove
+            }
+        }
+        result = shopify_api_call(
+            f'orders/{order_id}/order_edits/{order_edit_id}/calculated_line_items/{old_line_item_id}.json',
+            method='PUT',
+            data=remove_data
+        )
         
         if result:
-            print(f"✓ Added to order notes: {serial_text}")
+            print(f"✓ Removed old line item")
+        
+        # Step 3: Add new line item
+        add_data = {
+            'calculated_line_item': {
+                'variant_id': new_variant_id,
+                'quantity': quantity
+            }
+        }
+        result = shopify_api_call(
+            f'orders/{order_id}/order_edits/{order_edit_id}/calculated_line_items.json',
+            method='POST',
+            data=add_data
+        )
+        
+        if result:
+            print(f"✓ Added new line item")
+        
+        # Step 4: Commit the order edit
+        commit_data = {
+            'order_edit': {
+                'notify_customer': False  # Don't send notification about the edit
+            }
+        }
+        result = shopify_api_call(
+            f'orders/{order_id}/order_edits/{order_edit_id}/commit.json',
+            method='POST',
+            data=commit_data
+        )
+        
+        if result:
+            print(f"✓ Committed order edit - line items updated")
             return True
-        return False
+        else:
+            print(f"✗ Failed to commit order edit")
+            return False
+            
     except Exception as e:
-        print(f"✗ Error adding note: {e}")
+        print(f"✗ Error updating order line items: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def process_webhook(order_data):
@@ -175,7 +301,7 @@ def process_webhook(order_data):
     
     print(f"Processing order {order_number} (ID: {order_id})")
     
-    serials_assigned = []
+    products_created = []
     
     # Loop through each product in the order
     for item in order_data.get('line_items', []):
@@ -192,7 +318,6 @@ def process_webhook(order_data):
             print(f"✓ Clock product detected: {sku}")
             
             # Check product tags - only process if tagged "sample"
-            # Skip if tagged "featured" (already completed/ready to ship)
             product_result = shopify_api_call(f'products/{product_id}.json')
             if product_result:
                 tags = product_result.get('product', {}).get('tags', '')
@@ -210,35 +335,45 @@ def process_webhook(order_data):
                     print(f"⏭️ Skipping - product not tagged 'sample' (doesn't need manufacturing)")
                     continue
                 
-                print(f"✓ Product tagged 'sample' - needs manufacturing")
+                print(f"✓ Product tagged 'sample' - creating individual product")
             else:
                 print(f"⚠️ Could not fetch product tags - skipping for safety")
                 continue
             
-            # Generate one serial per quantity
+            # Process each quantity as separate product
             for i in range(quantity):
-                print(f"Generating serial {i+1} of {quantity}...")
+                print(f"Processing item {i+1} of {quantity}...")
+                
+                # Generate serial number
                 serial = get_next_serial()
                 if not serial:
                     print("✗ Failed to generate serial")
                     continue
                 
                 print(f"✓ Generated serial: {serial}")
-                serials_assigned.append(serial)
                 
-                # Add a row to the Google Sheet for manufacturing tracking
+                # Create new product based on sample
+                new_product = create_product_from_sample(product_id, serial)
+                
+                if not new_product:
+                    print("✗ Failed to create product")
+                    continue
+                
+                products_created.append(new_product['title'])
+                
+                # Update order: remove sample, add new product
+                print("Updating order line items...")
+                update_order_line_items(order_id, line_item_id, new_product['variant_id'], 1)
+                
+                # Log to Google Sheet
                 print("Logging to Google Sheet...")
                 log_to_google_sheet(product_title, serial, order_number, customer_name, order_date)
     
-    # Add all generated serials to the order notes
-    if serials_assigned:
-        add_serial_to_order_note(order_id, serials_assigned)
-    
-    print(f"WEBHOOK COMPLETE - {len(serials_assigned)} serials assigned")
+    print(f"WEBHOOK COMPLETE - {len(products_created)} products created")
     
     return {
         'status': 'success',
-        'serials': serials_assigned,
+        'products': products_created,
         'order': order_number
     }
 
@@ -249,7 +384,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Webhook handler is running - v7 (tag-based filtering)')
+        self.wfile.write(b'Webhook handler is running - v8 (product creation + order editing)')
         return
     
     def do_POST(self):
