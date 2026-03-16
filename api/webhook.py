@@ -2,9 +2,10 @@
 # 1. Generates a unique serial number (LCK-####)
 # 2. Creates a new Shopify product with serial in name (e.g., "Elena-1028")
 # 3. Copies photos, description, price from sample product
-# 4. Logs to Clocksheet with hyperlink to new product
-# 5. Adds serial number to order notes
-# 6. Prevents duplicate processing with atomic locking
+# 4. Replaces sample product in order with new product (add first, then remove)
+# 5. Logs to Clocksheet with hyperlink to new product
+# 6. Adds serial number to order notes
+# 7. Prevents duplicate processing with atomic locking
 
 import json
 import os
@@ -221,6 +222,110 @@ def create_product_from_sample(sample_product_id, serial):
         traceback.print_exc()
         return None
 
+def update_order_line_items(order_id, old_line_item_id, new_variant_id, quantity, price):
+    """Replace sample product line item with new product in the order"""
+    try:
+        print(f"Starting order edit for order {order_id}...")
+        
+        # Step 1: Create an order edit session
+        edit_data = {'order_edit': {}}
+        result = shopify_api_call(f'orders/{order_id}/order_edits.json', method='POST', data=edit_data)
+        
+        if not result or not result.get('order_edit'):
+            print(f"✗ Failed to create order edit")
+            return False
+        
+        order_edit_id = result['order_edit']['id']
+        print(f"✓ Created order edit session: {order_edit_id}")
+        
+        # Step 2: ADD new line item FIRST (before removing old one)
+        print(f"Adding new product variant {new_variant_id}...")
+        add_data = {
+            'calculated_line_item': {
+                'variant_id': new_variant_id,
+                'quantity': quantity,
+                'price': price
+            }
+        }
+        result = shopify_api_call(
+            f'orders/{order_id}/order_edits/{order_edit_id}/calculated_line_items.json',
+            method='POST',
+            data=add_data
+        )
+        
+        if not result:
+            print(f"✗ Failed to add new line item")
+            return False
+        
+        print(f"✓ Added new line item")
+        
+        # Step 3: THEN remove old line item (set quantity to 0)
+        print(f"Removing old line item {old_line_item_id}...")
+        
+        # First, get the calculated line item ID for the old item
+        result = shopify_api_call(f'orders/{order_id}/order_edits/{order_edit_id}.json')
+        if not result:
+            print(f"✗ Failed to get order edit details")
+            return False
+        
+        # Find the calculated line item that corresponds to our old line item
+        calculated_line_items = result.get('order_edit', {}).get('line_items', [])
+        old_calculated_id = None
+        
+        for calc_item in calculated_line_items:
+            if calc_item.get('id') == old_line_item_id:
+                old_calculated_id = calc_item.get('id')
+                break
+        
+        if not old_calculated_id:
+            print(f"⚠️ Could not find calculated line item for old product")
+            # Continue anyway - new item was added
+        else:
+            # Remove by setting quantity to 0 and restock
+            remove_data = {
+                'calculated_line_item': {
+                    'quantity': 0,
+                    'restock': True  # Return inventory
+                }
+            }
+            result = shopify_api_call(
+                f'orders/{order_id}/order_edits/{order_edit_id}/calculated_line_items/{old_calculated_id}.json',
+                method='PUT',
+                data=remove_data
+            )
+            
+            if result:
+                print(f"✓ Removed old line item")
+            else:
+                print(f"⚠️ Could not remove old line item, but new one was added")
+        
+        # Step 4: Commit the order edit
+        print(f"Committing order edit...")
+        commit_data = {
+            'order_edit': {
+                'notify_customer': False,
+                'staff_note': 'Automated product substitution by webhook'
+            }
+        }
+        result = shopify_api_call(
+            f'orders/{order_id}/order_edits/{order_edit_id}/commit.json',
+            method='POST',
+            data=commit_data
+        )
+        
+        if result:
+            print(f"✓ Successfully committed order edit - line items updated!")
+            return True
+        else:
+            print(f"✗ Failed to commit order edit")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Error during order edit: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def add_serial_to_order_note(order_id, serial):
     """Add serial number to order notes"""
     try:
@@ -340,6 +445,7 @@ def process_webhook(order_data):
             sku = item.get('sku', '')
             quantity = item.get('quantity', 1)
             product_id = item.get('product_id')
+            price = item.get('price', '0.00')
             
             print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
             
@@ -392,6 +498,10 @@ def process_webhook(order_data):
                     
                     products_created.append(new_product['title'])
                     
+                    # Update order: add new product, remove sample
+                    print("Updating order line items...")
+                    update_order_line_items(order_id, line_item_id, new_product['variant_id'], 1, price)
+                    
                     # Log to Google Sheet with hyperlink to new product
                     print("Logging to Google Sheet...")
                     log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
@@ -427,7 +537,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Webhook handler is running - v11 (atomic locking)')
+        self.wfile.write(b'Webhook handler is running - v12 (corrected order edit sequence)')
         return
     
     def do_POST(self):
