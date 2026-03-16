@@ -213,75 +213,52 @@ def create_product_from_sample(sample_product_id, serial):
 def update_order_line_items(order_id, old_line_item_id, new_variant_id, quantity):
     """Replace sample product line item with new product in the order"""
     try:
-        # Use Order Edit API to modify the order
-        # Step 1: Create an order edit
-        edit_data = {
-            'order_edit': {}
-        }
-        result = shopify_api_call(f'orders/{order_id}/order_edits.json', method='POST', data=edit_data)
-        
-        if not result or not result.get('order_edit'):
-            print(f"✗ Failed to create order edit")
+        # First, let's try a simpler approach: directly update the order's line items
+        # Get current order
+        result = shopify_api_call(f'orders/{order_id}.json')
+        if not result:
             return False
         
-        order_edit_id = result['order_edit']['id']
-        calculated_order_id = result['order_edit']['calculated_order']['id']
+        order = result.get('order', {})
+        line_items = order.get('line_items', [])
         
-        print(f"✓ Created order edit: {order_edit_id}")
+        # Build new line items array
+        new_line_items = []
+        for item in line_items:
+            if item['id'] == old_line_item_id:
+                # Replace with new product
+                new_line_items.append({
+                    'variant_id': new_variant_id,
+                    'quantity': quantity,
+                    'price': item.get('price')
+                })
+            else:
+                # Keep existing items
+                new_line_items.append({
+                    'id': item['id'],
+                    'variant_id': item.get('variant_id'),
+                    'quantity': item['quantity']
+                })
         
-        # Step 2: Remove old line item
-        remove_data = {
-            'line_item': {
-                'id': old_line_item_id,
-                'quantity': 0  # Set to 0 to remove
+        # Try to update the order
+        update_data = {
+            'order': {
+                'id': order_id,
+                'line_items': new_line_items
             }
         }
-        result = shopify_api_call(
-            f'orders/{order_id}/order_edits/{order_edit_id}/calculated_line_items/{old_line_item_id}.json',
-            method='PUT',
-            data=remove_data
-        )
+        
+        result = shopify_api_call(f'orders/{order_id}.json', method='PUT', data=update_data)
         
         if result:
-            print(f"✓ Removed old line item")
-        
-        # Step 3: Add new line item
-        add_data = {
-            'calculated_line_item': {
-                'variant_id': new_variant_id,
-                'quantity': quantity
-            }
-        }
-        result = shopify_api_call(
-            f'orders/{order_id}/order_edits/{order_edit_id}/calculated_line_items.json',
-            method='POST',
-            data=add_data
-        )
-        
-        if result:
-            print(f"✓ Added new line item")
-        
-        # Step 4: Commit the order edit
-        commit_data = {
-            'order_edit': {
-                'notify_customer': False  # Don't send notification about the edit
-            }
-        }
-        result = shopify_api_call(
-            f'orders/{order_id}/order_edits/{order_edit_id}/commit.json',
-            method='POST',
-            data=commit_data
-        )
-        
-        if result:
-            print(f"✓ Committed order edit - line items updated")
+            print(f"✓ Updated order line items")
             return True
         else:
-            print(f"✗ Failed to commit order edit")
+            print(f"✗ Failed to update order")
             return False
             
     except Exception as e:
-        print(f"✗ Error updating order line items: {e}")
+        print(f"✗ Error updating order: {e}")
         import traceback
         traceback.print_exc()
         return False
