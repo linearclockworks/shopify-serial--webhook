@@ -1,2 +1,7 @@
 {
+  "rewrites": [
+    { "source": "/api/lookup", "destination": "/api/webhook" },
+    { "source": "/api/manual", "destination": "/api/webhook" },
+    { "source": "/", "destination": "/api/webhook" }
+  ]
 }
