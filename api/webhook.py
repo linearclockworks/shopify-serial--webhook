@@ -283,6 +283,11 @@ def process_order(order_data, force=False, inventory_qty=1):
 
             print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
 
+            # Skip removed line items (quantity = 0 or None)
+            if not quantity or quantity == 0:
+                print(f"⏭️ Skipping removed line item: {product_title}")
+                continue
+
             if not (sku and sku.upper().startswith('LCK-')):
                 print(f"⏭️ Skipping non-clock item: {sku}")
                 continue
@@ -578,7 +583,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b'Webhook handler v12 - tag swapping + manual trigger')
+        self.wfile.write(b'Webhook handler v14 - skip removed line items')
 
     def do_POST(self):
         from urllib.parse import urlparse
