@@ -278,13 +278,18 @@ def process_order(order_data, force=False, inventory_qty=1):
         for item in order_data.get('line_items', []):
             product_title = item.get('title', '')
             sku = item.get('sku', '')
-            quantity = item.get('quantity', 1)
-            product_id = item.get('product_id')
 
-            print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity})")
+            # Use current_quantity to detect removals during order edits
+            # Default to 0 if the field is missing
+            current_qty = item.get('current_quantity', 0)
 
-            # Skip removed line items (quantity = 0 or None)
-            if not quantity or quantity == 0:
+            # This is the original quantity at the time of purchase
+            original_qty = item.get('quantity', 1)
+
+            print(f"Line item: {product_title} (SKU: {sku}, Current Qty: {current_qty})")
+
+            # Skip items where the current quantity is 0 (meaning it was removed)
+            if current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
                 continue
 
