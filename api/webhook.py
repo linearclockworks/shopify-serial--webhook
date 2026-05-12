@@ -159,10 +159,7 @@ def create_product_from_sample(sample_product_id, serial, force=False, inventory
 
         if result and result.get('product'):
             new_product_id = result['product']['id']
-            return {
-                'product_id': new_product_id,
-                'title': new_title
-            }
+            return {'product_id': new_product_id, 'title': new_title}
         return None
     except Exception as e:
         print(f"✗ Error creating product: {e}")
@@ -228,8 +225,9 @@ def process_order(order_data, force=False, inventory_qty=1):
             product_id = item.get('product_id')
             product_title = item.get('title', '')
             sku = item.get('sku', '')
-
-            # REPAIR: Determine quantity based on current vs original
+            
+            # --- FIXED QUANTITY LOGIC ---
+            # Use current_quantity to handle removals. Fallback to original quantity.
             current_qty = item.get('current_quantity', item.get('quantity', 1))
 
             if current_qty == 0:
@@ -239,8 +237,7 @@ def process_order(order_data, force=False, inventory_qty=1):
             if not (sku and sku.upper().startswith('LCK-')):
                 continue
 
-            # Process each unit of the clock
-            for i in range(current_qty):
+            for _ in range(current_qty):
                 serial = get_next_serial()
                 if not serial: continue
 
@@ -257,7 +254,6 @@ def process_order(order_data, force=False, inventory_qty=1):
             mark_order_as_completed(order_id)
 
         return {'status': 'success', 'products': products_created, 'serials': serials_assigned, 'order': order_number}
-
     except Exception as e:
         print(f"ERROR: {e}")
         raise
@@ -280,9 +276,8 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
   table { width: 100%; border-collapse: collapse; margin-top: 15px; }
   th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: .9rem; }
   th { background: #f7f9fc; }
-  .removed-row td { text-decoration: line-through; color: #999; background: #fffafb; }
-  .removed-label { color: #d93025; font-weight: bold; text-decoration: none !important; display: inline-block; }
-  .warn { background: #fff8e1; border: 1px solid #ffe082; border-radius: 8px; padding: 12px; margin-top: 15px; font-size: .9rem; color: #7a5800; }
+  .removed-row td { text-decoration: line-through; color: #999; }
+  .removed-label { color: #d93025; font-weight: bold; text-decoration: none !important; }
   .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .75rem; background: #e8f0fe; color: #1a56db; margin-right: 4px; }
   .tag.sample { background: #fce8e6; color: #c0392b; }
   .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 14px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; display: none; margin-top: 16px; }
@@ -290,16 +285,24 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <h1>⚡ Manual Webhook Trigger</h1>
-<p style="color:#666">Items with 0 quantity (removed during edit) will be skipped automatically.</p>
+<p style="color:#666">Force-process orders with your original build-type logic.</p>
 
 <div class="card">
   <label>Order Number</label>
   <input type="text" id="orderInput" placeholder="2882">
   
-  <div style="margin-top:15px;">
-    <label>Build Type</label>
-    <label style="font-weight:400;"><input type="radio" name="buildType" value="1"> Stock build (Qty 1)</label>
-    <label style="font-weight:400;"><input type="radio" name="buildType" value="0" checked> Customer order (Qty 0)</label>
+  <div style="margin-top:14px;">
+    <label style="font-weight:600; font-size:.9rem;">Build Type</label>
+    <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+      <label style="display:flex; align-items:center; gap:6px; font-weight:400; cursor:pointer;">
+        <input type="radio" name="buildType" value="1">
+        <span><strong>Stock build</strong> — I ordered it, qty 1, appears on site</span>
+      </label>
+      <label style="display:flex; align-items:center; gap:6px; font-weight:400; cursor:pointer;">
+        <input type="radio" name="buildType" value="0" checked>
+        <span><strong>Customer order</strong> — already sold, qty 0, hidden from site</span>
+      </label>
+    </div>
   </div>
 
   <button id="lookupBtn">Look Up Order</button>
@@ -309,7 +312,6 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
       <thead><tr><th>Product</th><th>SKU</th><th>Tags</th><th>Qty</th></tr></thead>
       <tbody id="itemsBody"></tbody>
     </table>
-    <div class="warn" id="warnBox"></div>
     <button style="background:#c0392b" id="fireBtn">🔥 Force Process This Order</button>
     <div class="log" id="logBox"></div>
   </div>
@@ -425,7 +427,6 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         payload = json.loads(self.rfile.read(content_length))
-        
         if self.path == '/api/manual':
             order_res = shopify_api_call(f"orders/{payload.get('order_id')}.json")
             result = process_order(order_res['order'], force=True, inventory_qty=int(payload.get('inventory_qty', 1)))
