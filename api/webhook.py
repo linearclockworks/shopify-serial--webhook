@@ -156,22 +156,33 @@ def get_location_id_by_name(location_name):
         return None
 
 def set_inventory_at_location(inventory_item_id, location_id, quantity):
-    """Set inventory quantity at a specific location using a flat inventory_levels/set payload"""
+    """Ensure inventory item is connected to the targeted location, then cleanly set quantity"""
+    if not inventory_item_id or not location_id:
+        print(f"✗ Cannot configure inventory: item_id or location_id is missing.")
+        return False
     try:
+        # Step A: Connect the inventory item to the location first (prevents 400 Bad Requests)
+        connect_data = {
+            'inventory_item_id': int(inventory_item_id),
+            'location_id': int(location_id)
+        }
+        shopify_api_call('inventory_levels/connect.json', method='POST', data=connect_data)
+        
+        # Step B: Apply flat payload layout configuration to set inventory levels
         adjust_data = {
-            'inventory_item_id': inventory_item_id,
-            'location_id': location_id,
-            'available': quantity
+            'inventory_item_id': int(inventory_item_id),
+            'location_id': int(location_id),
+            'available': int(quantity)
         }
         result = shopify_api_call('inventory_levels/set.json', method='POST', data=adjust_data)
         if result:
-            print(f"✓ Set inventory at location {location_id}: qty={quantity}")
+            print(f"✓ Connected & set inventory at location {location_id}: qty={quantity}")
             return True
         else:
-            print(f"⚠️ Failed to set inventory at location {location_id}")
+            print(f"⚠️ Failed to apply inventory level setting at location {location_id}")
             return False
     except Exception as e:
-        print(f"⚠️ Failed to set inventory at location {location_id}: {e}")
+        print(f"⚠️ Inventory processing failed at location {location_id}: {e}")
         return False
 
 def create_product_from_sample(sample_product_id, serial, add_featured_tag=False):
@@ -207,8 +218,7 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
                     {
                         'price': price,
                         'sku': serial,
-                        'inventory_management': 'shopify',
-                        'inventory_quantity': 1  # Always 1 (truthful inventory)
+                        'inventory_management': 'shopify'
                     }
                 ]
             }
@@ -221,6 +231,13 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
             variant = result['product'].get('variants', [{}])[0]
             new_variant_id = variant.get('id')
             inventory_item_id = variant.get('inventory_item_id')
+            
+            # Safeguard Recovery: If inventory_item_id is omitted from direct post return, query item directly
+            if not inventory_item_id and new_variant_id:
+                print("🔄 Fetching complete variant payload to resolve inventory tracking records...")
+                variant_res = shopify_api_call(f'variants/{new_variant_id}.json')
+                if variant_res and variant_res.get('variant'):
+                    inventory_item_id = variant_res['variant'].get('inventory_item_id')
             
             if inventory_item_id:
                 sanded_location_id = get_location_id_by_name('SandedNBranded')
@@ -259,23 +276,29 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
         return False, f"orderEditBegin error: {edit_data['userErrors'][0]['message']}"
         
     calc_order_id = edit_data['calculatedOrder']['id']
+    print(f"✓ Order edit session started: {calc_order_id}")
     
-    # Step 2: Remove Old Sample Product
+    # Step 2: Remove Old Sample Product by adjusting its quantity to 0
     remove_mutation = """
-    mutation orderEditRemoveLineItem($id: ID!, $lineItemId: ID!) {
-      orderEditRemoveLineItem(id: $id, lineItemId: $lineItemId) {
+    mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
+      orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
         calculatedOrder { id }
         userErrors { field message }
       }
     }
     """
-    res = shopify_graphql_call(remove_mutation, {"id": calc_order_id, "lineItemId": f"gid://shopify/LineItem/{old_line_item_id}"})
-    if not res or 'errors' in res or not res.get('data', {}).get('orderEditRemoveLineItem'):
-        return False, "orderEditRemoveLineItem failed execution"
+    res = shopify_graphql_call(remove_mutation, {
+        "id": calc_order_id, 
+        "lineItemId": f"gid://shopify/LineItem/{old_line_item_id}", 
+        "quantity": 0
+    })
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditSetQuantity'):
+        return False, "orderEditSetQuantity failed execution"
         
-    remove_data = res['data']['orderEditRemoveLineItem']
+    remove_data = res['data']['orderEditSetQuantity']
     if remove_data.get('userErrors'):
-        return False, f"orderEditRemoveLineItem error: {remove_data['userErrors'][0]['message']}"
+        return False, f"orderEditSetQuantity error: {remove_data['userErrors'][0]['message']}"
+    print(f"✓ Successfully staged removal of sample line item")
 
     # Step 3: Add New Serialized Variant Product
     add_mutation = """
@@ -286,13 +309,18 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
       }
     }
     """
-    res = shopify_graphql_call(add_mutation, {"id": calc_order_id, "variantId": f"gid://shopify/ProductVariant/{new_variant_id}", "quantity": 1})
+    res = shopify_graphql_call(add_mutation, {
+        "id": calc_order_id, 
+        "variantId": f"gid://shopify/ProductVariant/{new_variant_id}", 
+        "quantity": 1
+    })
     if not res or 'errors' in res or not res.get('data', {}).get('orderEditAddVariant'):
         return False, "orderEditAddVariant failed execution"
         
     add_data = res['data']['orderEditAddVariant']
     if add_data.get('userErrors'):
         return False, f"orderEditAddVariant error: {add_data['userErrors'][0]['message']}"
+    print(f"✓ Successfully staged addition of serialized unique variant")
 
     # Step 4: Commit transaction changes to live order records
     commit_mutation = """
