@@ -4,8 +4,9 @@
 # 3. Copies photos, description, price from sample product
 # 4. Strips "sample" tag, adds "featured" to new product
 # 5. Logs to Clocksheet with hyperlink to new product
-# 6. Adds serial number to order notes
-# 7. Prevents duplicate processing with atomic locking
+# 6. Swaps out the "sample" line item on the order for the new serialized product via GraphQL
+# 7. Adds serial number to order notes as a fallback if a swap fails
+# 8. Prevents duplicate processing with atomic locking
 
 import json
 import os
@@ -85,24 +86,24 @@ def shopify_api_call(endpoint, method='GET', data=None):
         print(f"✗ API Error: {e}")
         return None
 
-def graphql_call(query, variables=None):
-    """Make GraphQL calls to Shopify"""
+def shopify_graphql_call(query, variables=None):
+    """Utility wrapper for executing Shopify Admin GraphQL API mutations"""
     url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2026-01/graphql.json"
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_TOKEN,
         'Content-Type': 'application/json'
     }
-    payload = {
-        'query': query,
-        'variables': variables or {}
-    }
+    payload = {'query': query}
+    if variables:
+        payload['variables'] = variables
+        
     req_data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=req_data, headers=headers, method='POST')
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             return json.loads(response.read().decode())
     except Exception as e:
-        print(f"✗ GraphQL Error: {e}")
+        print(f"✗ GraphQL API Error: {e}")
         return None
 
 def get_next_serial():
@@ -126,150 +127,6 @@ def get_next_serial():
         shopify_api_call(f'metafields/{metafield_id}.json', method='PUT', data=update_data)
         return serial
     return None
-
-def swap_order_line_item(order_id, old_product_id, new_product_id):
-    """Swap sample product for new serialized product using GraphQL Order Edit API"""
-    try:
-        # Step 1: Find the line item to remove and get variant ID of new product
-        order_result = shopify_api_call(f'orders/{order_id}.json')
-        if not order_result:
-            print(f"✗ Could not fetch order {order_id}")
-            return False
-        
-        order = order_result.get('order', {})
-        old_line_item_id = None
-        
-        # Find the line item matching the old product
-        for item in order.get('line_items', []):
-            if item.get('product_id') == old_product_id:
-                old_line_item_id = item.get('id')
-                break
-        
-        if not old_line_item_id:
-            print(f"⚠️ Could not find line item for product {old_product_id} in order")
-            return False
-        
-        # Get the new product's variant ID
-        new_product_result = shopify_api_call(f'products/{new_product_id}.json')
-        if not new_product_result:
-            print(f"✗ Could not fetch new product {new_product_id}")
-            return False
-        
-        new_variant_id = new_product_result['product']['variants'][0]['id']
-        
-        # Step 2: Begin order edit
-        begin_mutation = '''
-        mutation orderEditBegin($id: ID!) {
-          orderEditBegin(id: $id) {
-            calculatedOrder {
-              id
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-        '''
-        
-        begin_result = graphql_call(begin_mutation, {'id': f'gid://shopify/Order/{order_id}'})
-        
-        if not begin_result or begin_result.get('errors'):
-            print(f"✗ orderEditBegin failed: {begin_result}")
-            return False
-        
-        data = begin_result.get('data', {})
-        if not data.get('orderEditBegin'):
-            print(f"✗ orderEditBegin returned no data: {begin_result}")
-            return False
-        
-        calculated_order_id = data['orderEditBegin']['calculatedOrder']['id']
-        print(f"✓ Order edit session started: {calculated_order_id}")
-        
-        # Step 3: Remove old line item
-        remove_mutation = '''
-        mutation orderEditRemoveLineItem($calculatedOrderId: ID!, $lineItemId: ID!) {
-          orderEditRemoveLineItem(calculatedOrderId: $calculatedOrderId, lineItemId: $lineItemId) {
-            calculatedOrder {
-              id
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-        '''
-        
-        remove_result = graphql_call(remove_mutation, {
-            'calculatedOrderId': calculated_order_id,
-            'lineItemId': f'gid://shopify/LineItem/{old_line_item_id}'
-        })
-        
-        if not remove_result or remove_result.get('errors'):
-            print(f"✗ orderEditRemoveLineItem failed: {remove_result}")
-            return False
-        
-        print(f"✓ Removed old line item {old_line_item_id}")
-        
-        # Step 4: Add new product variant
-        add_mutation = '''
-        mutation orderEditAddVariant($calculatedOrderId: ID!, $variantId: ID!, $quantity: Int!) {
-          orderEditAddVariant(calculatedOrderId: $calculatedOrderId, variantId: $variantId, quantity: $quantity) {
-            calculatedOrder {
-              id
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-        '''
-        
-        add_result = graphql_call(add_mutation, {
-            'calculatedOrderId': calculated_order_id,
-            'variantId': f'gid://shopify/ProductVariant/{new_variant_id}',
-            'quantity': 1
-        })
-        
-        if not add_result or add_result.get('errors'):
-            print(f"✗ orderEditAddVariant failed: {add_result}")
-            return False
-        
-        print(f"✓ Added new variant {new_variant_id}")
-        
-        # Step 5: Commit the order edit
-        commit_mutation = '''
-        mutation orderEditCommit($calculatedOrderId: ID!) {
-          orderEditCommit(calculatedOrderId: $calculatedOrderId, notifyCustomer: false) {
-            order {
-              id
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-        '''
-        
-        commit_result = graphql_call(commit_mutation, {
-            'calculatedOrderId': calculated_order_id
-        })
-        
-        if not commit_result or commit_result.get('errors'):
-            print(f"✗ orderEditCommit failed: {commit_result}")
-            return False
-        
-        print(f"✓ Order edit committed successfully")
-        return True
-        
-    except Exception as e:
-        print(f"✗ Error swapping line item: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
 def swap_tags(tags_string, add_featured_tag=False):
     """Remove 'sample' tag. Add 'featured' tag only if add_featured_tag=True (stock builds)."""
@@ -299,14 +156,12 @@ def get_location_id_by_name(location_name):
         return None
 
 def set_inventory_at_location(inventory_item_id, location_id, quantity):
-    """Set inventory quantity at a specific location using inventory_levels/set"""
+    """Set inventory quantity at a specific location using a flat inventory_levels/set payload"""
     try:
         adjust_data = {
-            'inventory_level': {
-                'inventory_item_id': inventory_item_id,
-                'location_id': location_id,
-                'available': quantity
-            }
+            'inventory_item_id': inventory_item_id,
+            'location_id': location_id,
+            'available': quantity
         }
         result = shopify_api_call('inventory_levels/set.json', method='POST', data=adjust_data)
         if result:
@@ -363,11 +218,10 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
 
         if result and result.get('product'):
             new_product_id = result['product']['id']
-            
-            # Product created from "sample" tag, so make available at both locations
-            # (same qty at each location for fulfillment flexibility)
             variant = result['product'].get('variants', [{}])[0]
+            new_variant_id = variant.get('id')
             inventory_item_id = variant.get('inventory_item_id')
+            
             if inventory_item_id:
                 sanded_location_id = get_location_id_by_name('SandedNBranded')
                 if sanded_location_id:
@@ -377,20 +231,99 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
                 else:
                     print(f"⚠️ Could not find 'SandedNBranded' location - product only available at default location")
             
-            return {'product_id': new_product_id, 'title': new_title}
+            return {'product_id': new_product_id, 'variant_id': new_variant_id, 'title': new_title}
         return None
     except Exception as e:
         print(f"✗ Error creating product: {e}")
         return None
 
-def add_serial_to_order_note(order_id, serial):
+def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
+    """Executes the complete GraphQL sequence to swap out the sample for the unique item on an active order layout"""
+    print(f"Starting line item swap sequence for Order ID: {order_id}")
+    
+    # Step 1: Open Edit Session
+    begin_mutation = """
+    mutation orderEditBegin($id: ID!) {
+      orderEditBegin(id: $id) {
+        calculatedOrder { id }
+        userErrors { field message }
+      }
+    }
+    """
+    res = shopify_graphql_call(begin_mutation, {"id": f"gid://shopify/Order/{order_id}"})
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditBegin'):
+        return False, f"orderEditBegin failed syntax check: {res}"
+    
+    edit_data = res['data']['orderEditBegin']
+    if edit_data.get('userErrors'):
+        return False, f"orderEditBegin error: {edit_data['userErrors'][0]['message']}"
+        
+    calc_order_id = edit_data['calculatedOrder']['id']
+    
+    # Step 2: Remove Old Sample Product
+    remove_mutation = """
+    mutation orderEditRemoveLineItem($id: ID!, $lineItemId: ID!) {
+      orderEditRemoveLineItem(id: $id, lineItemId: $lineItemId) {
+        calculatedOrder { id }
+        userErrors { field message }
+      }
+    }
+    """
+    res = shopify_graphql_call(remove_mutation, {"id": calc_order_id, "lineItemId": f"gid://shopify/LineItem/{old_line_item_id}"})
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditRemoveLineItem'):
+        return False, "orderEditRemoveLineItem failed execution"
+        
+    remove_data = res['data']['orderEditRemoveLineItem']
+    if remove_data.get('userErrors'):
+        return False, f"orderEditRemoveLineItem error: {remove_data['userErrors'][0]['message']}"
+
+    # Step 3: Add New Serialized Variant Product
+    add_mutation = """
+    mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+      orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
+        calculatedOrder { id }
+        userErrors { field message }
+      }
+    }
+    """
+    res = shopify_graphql_call(add_mutation, {"id": calc_order_id, "variantId": f"gid://shopify/ProductVariant/{new_variant_id}", "quantity": 1})
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditAddVariant'):
+        return False, "orderEditAddVariant failed execution"
+        
+    add_data = res['data']['orderEditAddVariant']
+    if add_data.get('userErrors'):
+        return False, f"orderEditAddVariant error: {add_data['userErrors'][0]['message']}"
+
+    # Step 4: Commit transaction changes to live order records
+    commit_mutation = """
+    mutation orderEditCommit($id: ID!) {
+      orderEditCommit(id: $id) {
+        order { id }
+        userErrors { field message }
+      }
+    }
+    """
+    res = shopify_graphql_call(commit_mutation, {"id": calc_order_id})
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditCommit'):
+        return False, "orderEditCommit failed execution"
+        
+    commit_data = res['data']['orderEditCommit']
+    if commit_data.get('userErrors'):
+        return False, f"orderEditCommit error: {commit_data['userErrors'][0]['message']}"
+        
+    return True, "Success"
+
+def add_serial_to_order_note(order_id, serial, swap_status=None):
     try:
         result = shopify_api_call(f'orders/{order_id}.json')
         if not result: return False
         order = result.get('order', {})
         current_note = order.get('note', '') or ''
-        note_addition = f"\nSerial Number: {serial}"
+        
+        status_text = f" ({swap_status})" if swap_status else ""
+        note_addition = f"\nSerial Number: {serial}{status_text}"
         new_note = f"{current_note}{note_addition}" if current_note else note_addition.strip()
+        
         shopify_api_call(f'orders/{order_id}.json', method='PUT', data={'order': {'note': new_note}})
         return True
     except: return False
@@ -453,20 +386,18 @@ def process_order(order_data, add_featured_tag=False):
             quantity = item.get('quantity', 1)
             current_qty = item.get('current_quantity', quantity)
             product_id = item.get('product_id')
+            line_item_id = item.get('id')
 
             print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
 
-            # Skip removed line items
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
                 continue
 
-            # Skip non-clock products
             if not (sku and sku.upper().startswith('LCK-')):
                 print(f"⏭️ Skipping non-clock item: {sku}")
                 continue
 
-            # ALWAYS check tags (applies to both webhook and manual trigger)
             product_result = shopify_api_call(f'products/{product_id}.json')
             if product_result:
                 tags = product_result.get('product', {}).get('tags', '')
@@ -499,28 +430,16 @@ def process_order(order_data, add_featured_tag=False):
                     products_created.append(new_product['title'])
                     log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
                     
-                    # Attempt to swap the line item in the order (sample → serialized product)
-                    if swap_order_line_item(order_id, product_id, new_product['product_id']):
-                        print(f"✓ Order line item swapped: {product_title} → {new_product['title']}")
+                    # Run the live financial layout swap sequence
+                    swap_success, swap_msg = execute_line_item_swap(order_id, line_item_id, new_product['variant_id'])
+                    if swap_success:
+                        print(f"✓ GraphQL order swap complete: {serial} is now explicitly on the order sheet")
+                        add_serial_to_order_note(order_id, serial, swap_status="Swapped successfully")
                     else:
-                        # Swap failed - add warning to order notes so it's visible in Shopify admin
-                        warning_note = f"\n⚠️ LINE ITEM SWAP FAILED: Customer still sees '{product_title}' but product '{new_product['title']}' was created. Please manually remove '{product_title}' and add '{new_product['title']}'."
-                        try:
-                            result = shopify_api_call(f'orders/{order_id}.json')
-                            if result:
-                                order = result.get('order', {})
-                                current_note = order.get('note', '') or ''
-                                new_note = f"{current_note}{warning_note}" if current_note else warning_note.strip()
-                                shopify_api_call(f'orders/{order_id}.json', method='PUT', data={'order': {'note': new_note}})
-                                print(f"✓ Swap failure logged to order notes")
-                        except Exception as e:
-                            print(f"⚠️ Could not log swap failure to order notes: {e}")
-
-        for serial in serials_assigned:
-            add_serial_to_order_note(order_id, serial)
+                        print(f"⚠️ GraphQL order swap fallback triggered: {swap_msg}")
+                        add_serial_to_order_note(order_id, serial, swap_status="Note fallback only")
 
         mark_order_as_completed(order_id)
-
         return {'status': 'success', 'products': products_created, 'serials': serials_assigned, 'order': order_number}
     except Exception as e:
         print(f"ERROR: {e}")
