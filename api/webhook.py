@@ -268,17 +268,26 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
     }
     """
     res = shopify_graphql_call(begin_mutation, {"id": f"gid://shopify/Order/{order_id}"})
-    if not res or 'errors' in res or not res.get('data', {}).get('orderEditBegin'):
-        return False, f"orderEditBegin failed syntax check: {res}"
+    if not res:
+        return False, "orderEditBegin connection failure or empty response"
+    if 'errors' in res:
+        return False, f"orderEditBegin GraphQL top-level error: {res['errors']}"
     
-    edit_data = res['data']['orderEditBegin']
+    edit_data = res.get('data', {}).get('orderEditBegin')
+    if not edit_data:
+        return False, f"orderEditBegin returned no data block: {res}"
     if edit_data.get('userErrors'):
-        return False, f"orderEditBegin error: {edit_data['userErrors'][0]['message']}"
+        return False, f"orderEditBegin user error: {edit_data['userErrors'][0]['message']}"
         
     calc_order_id = edit_data['calculatedOrder']['id']
     print(f"✓ Order edit session started: {calc_order_id}")
     
-    # Step 2: Remove Old Sample Product by adjusting its quantity to 0
+    # Step 2: Try both standard GID formats to handle mutations robustly across edge case triggers
+    line_item_gids = [
+        f"gid://shopify/LineItem/{old_line_item_id}",
+        f"gid://shopify/CalculatedLineItem/{old_line_item_id}"
+    ]
+    
     remove_mutation = """
     mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
       orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
@@ -287,18 +296,41 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
       }
     }
     """
-    res = shopify_graphql_call(remove_mutation, {
-        "id": calc_order_id, 
-        "lineItemId": f"gid://shopify/LineItem/{old_line_item_id}", 
-        "quantity": 0
-    })
-    if not res or 'errors' in res or not res.get('data', {}).get('orderEditSetQuantity'):
-        return False, "orderEditSetQuantity failed execution"
+    
+    swap_success = False
+    last_error_msg = ""
+    
+    for item_gid in line_item_gids:
+        print(f"Attempting quantity adjustment to 0 using: {item_gid}")
+        res = shopify_graphql_call(remove_mutation, {
+            "id": calc_order_id, 
+            "lineItemId": item_gid, 
+            "quantity": 0
+        })
         
-    remove_data = res['data']['orderEditSetQuantity']
-    if remove_data.get('userErrors'):
-        return False, f"orderEditSetQuantity error: {remove_data['userErrors'][0]['message']}"
-    print(f"✓ Successfully staged removal of sample line item")
+        if not res:
+            last_error_msg = "orderEditSetQuantity returned network connection failure"
+            continue
+        if 'errors' in res:
+            last_error_msg = f"orderEditSetQuantity GraphQL schema error: {res['errors']}"
+            continue
+            
+        remove_data = res.get('data', {}).get('orderEditSetQuantity')
+        if not remove_data:
+            last_error_msg = f"orderEditSetQuantity missing data block: {res}"
+            continue
+            
+        if remove_data.get('userErrors'):
+            last_error_msg = f"orderEditSetQuantity logic error: {remove_data['userErrors'][0]['message']}"
+            continue
+            
+        # If we successfully make it here, our GID format passed validation!
+        print(f"✓ Successfully staged removal of sample line item using {item_gid.split('/')[-2]}")
+        swap_success = True
+        break
+        
+    if not swap_success:
+        return False, f"All line item removal pathways exhausted. Details: {last_error_msg}"
 
     # Step 3: Add New Serialized Variant Product
     add_mutation = """
@@ -315,11 +347,11 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
         "quantity": 1
     })
     if not res or 'errors' in res or not res.get('data', {}).get('orderEditAddVariant'):
-        return False, "orderEditAddVariant failed execution"
+        return False, f"orderEditAddVariant structural/payload failure: {res}"
         
     add_data = res['data']['orderEditAddVariant']
     if add_data.get('userErrors'):
-        return False, f"orderEditAddVariant error: {add_data['userErrors'][0]['message']}"
+        return False, f"orderEditAddVariant logic error: {add_data['userErrors'][0]['message']}"
     print(f"✓ Successfully staged addition of serialized unique variant")
 
     # Step 4: Commit transaction changes to live order records
@@ -333,11 +365,11 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
     """
     res = shopify_graphql_call(commit_mutation, {"id": calc_order_id})
     if not res or 'errors' in res or not res.get('data', {}).get('orderEditCommit'):
-        return False, "orderEditCommit failed execution"
+        return False, f"orderEditCommit structural/payload failure: {res}"
         
     commit_data = res['data']['orderEditCommit']
     if commit_data.get('userErrors'):
-        return False, f"orderEditCommit error: {commit_data['userErrors'][0]['message']}"
+        return False, f"orderEditCommit logic error: {commit_data['userErrors'][0]['message']}"
         
     return True, "Success"
 
