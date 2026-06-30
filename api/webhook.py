@@ -107,15 +107,55 @@ def get_next_serial():
         return serial
     return None
 
-def swap_tags(tags_string):
-    """Remove 'sample' tag, add 'featured' tag."""
+def swap_tags(tags_string, add_featured_tag=False):
+    """Remove 'sample' tag. Add 'featured' tag only if add_featured_tag=True (stock builds)."""
     tags = [t.strip() for t in tags_string.split(',') if t.strip()]
     tags = [t for t in tags if t.lower() != 'sample']
-    if 'featured' not in [t.lower() for t in tags]:
-        tags.append('featured')
+    
+    if add_featured_tag:
+        if 'featured' not in [t.lower() for t in tags]:
+            tags.append('featured')
+    else:
+        # Remove featured tag for customer orders (hidden from site)
+        tags = [t for t in tags if t.lower() != 'featured']
+    
     return ', '.join(tags)
 
-def create_product_from_sample(sample_product_id, serial, inventory_qty=1):
+def get_location_id_by_name(location_name):
+    """Get location ID by location name (e.g., 'SandedNBranded', 'Brevard')"""
+    try:
+        result = shopify_api_call('locations.json')
+        if result and result.get('locations'):
+            for loc in result['locations']:
+                if loc.get('name', '').lower() == location_name.lower():
+                    return loc['id']
+        return None
+    except Exception as e:
+        print(f"⚠️ Could not fetch locations: {e}")
+        return None
+
+def set_inventory_at_location(inventory_item_id, location_id, quantity):
+    """Set inventory quantity at a specific location using inventory_levels/set"""
+    try:
+        adjust_data = {
+            'inventory_level': {
+                'inventory_item_id': inventory_item_id,
+                'location_id': location_id,
+                'available': quantity
+            }
+        }
+        result = shopify_api_call('inventory_levels/set.json', method='POST', data=adjust_data)
+        if result:
+            print(f"✓ Set inventory at location {location_id}: qty={quantity}")
+            return True
+        else:
+            print(f"⚠️ Failed to set inventory at location {location_id}")
+            return False
+    except Exception as e:
+        print(f"⚠️ Failed to set inventory at location {location_id}: {e}")
+        return False
+
+def create_product_from_sample(sample_product_id, serial, add_featured_tag=False):
     try:
         result = shopify_api_call(f'products/{sample_product_id}.json')
         if not result:
@@ -128,7 +168,7 @@ def create_product_from_sample(sample_product_id, serial, inventory_qty=1):
         new_title = f"{base_title}-{serial_only}"
 
         original_tags = sample.get('tags', '')
-        new_tags = swap_tags(original_tags)
+        new_tags = swap_tags(original_tags, add_featured_tag=add_featured_tag)
         
         images = [{'src': img.get('src')} for img in sample.get('images', [])]
         variants = sample.get('variants', [])
@@ -149,7 +189,7 @@ def create_product_from_sample(sample_product_id, serial, inventory_qty=1):
                         'price': price,
                         'sku': serial,
                         'inventory_management': 'shopify',
-                        'inventory_quantity': inventory_qty
+                        'inventory_quantity': 1  # Always 1 (truthful inventory)
                     }
                 ]
             }
@@ -159,6 +199,20 @@ def create_product_from_sample(sample_product_id, serial, inventory_qty=1):
 
         if result and result.get('product'):
             new_product_id = result['product']['id']
+            
+            # Product created from "sample" tag, so make available at both locations
+            # (same qty at each location for fulfillment flexibility)
+            variant = result['product'].get('variants', [{}])[0]
+            inventory_item_id = variant.get('inventory_item_id')
+            if inventory_item_id:
+                sanded_location_id = get_location_id_by_name('SandedNBranded')
+                if sanded_location_id:
+                    set_inventory_at_location(inventory_item_id, sanded_location_id, 1)
+                    tag_status = "featured (visible)" if add_featured_tag else "no featured tag (hidden)"
+                    print(f"✓ Created from 'sample' tag → qty=1 at both locations, {tag_status}")
+                else:
+                    print(f"⚠️ Could not find 'SandedNBranded' location - product only available at default location")
+            
             return {'product_id': new_product_id, 'title': new_title}
         return None
     except Exception as e:
@@ -207,11 +261,11 @@ def mark_order_as_completed(order_id):
         return True
     except: return False
 
-def process_order(order_data, force=False, inventory_qty=1):
+def process_order(order_data, add_featured_tag=False):
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
 
-    if not force and not try_acquire_processing_lock(order_id):
+    if not try_acquire_processing_lock(order_id):
         return {'status': 'already_processing', 'order': order_number}
 
     try:
@@ -224,7 +278,7 @@ def process_order(order_data, force=False, inventory_qty=1):
         except:
             order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        print(f"Processing order {order_number} (ID: {order_id}) force={force}")
+        print(f"Processing order {order_number} (ID: {order_id}) add_featured_tag={add_featured_tag}")
 
         products_created = []
         serials_assigned = []
@@ -276,7 +330,7 @@ def process_order(order_data, force=False, inventory_qty=1):
                 print(f"✓ Generated serial: {serial}")
                 serials_assigned.append(serial)
 
-                new_product = create_product_from_sample(product_id, serial, inventory_qty=inventory_qty)
+                new_product = create_product_from_sample(product_id, serial, add_featured_tag=add_featured_tag)
                 if new_product:
                     products_created.append(new_product['title'])
                     log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
@@ -284,8 +338,7 @@ def process_order(order_data, force=False, inventory_qty=1):
         for serial in serials_assigned:
             add_serial_to_order_note(order_id, serial)
 
-        if not force:
-            mark_order_as_completed(order_id)
+        mark_order_as_completed(order_id)
 
         return {'status': 'success', 'products': products_created, 'serials': serials_assigned, 'order': order_number}
     except Exception as e:
@@ -327,15 +380,15 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
   <input type="text" id="orderInput" placeholder="2882">
   
   <div style="margin-top:14px;">
-    <label style="font-weight:600; font-size:.9rem;">Build Type</label>
+    <label style="font-weight:600; font-size:.9rem;">Build Type (both create with qty=1, tagged difference controls visibility)</label>
     <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
       <label style="display:flex; align-items:center; gap:6px; font-weight:400; cursor:pointer;">
-        <input type="radio" name="buildType" value="1">
-        <span><strong>Stock build</strong> — I ordered it, qty 1, appears on site</span>
+        <input type="radio" name="buildType" value="stock">
+        <span><strong>Stock build</strong> — tagged "featured", visible on site</span>
       </label>
       <label style="display:flex; align-items:center; gap:6px; font-weight:400; cursor:pointer;">
-        <input type="radio" name="buildType" value="0" checked>
-        <span><strong>Customer order</strong> — already sold, qty 0, hidden from site</span>
+        <input type="radio" name="buildType" value="customer" checked>
+        <span><strong>Customer order</strong> — no "featured" tag, hidden from site</span>
       </label>
     </div>
   </div>
@@ -402,12 +455,13 @@ async function fire() {
   log.textContent = 'Processing...';
 
   try {
+    const buildType = document.querySelector('input[name=buildType]:checked').value;
     const resp = await fetch('/api/manual', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         order_id: currentOrderId,
-        inventory_qty: parseInt(document.querySelector('input[name=buildType]:checked').value)
+        add_featured_tag: buildType === 'stock'
       })
     });
     const res = await resp.json();
@@ -464,8 +518,8 @@ class handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(content_length))
         if self.path == '/api/manual':
             order_res = shopify_api_call(f"orders/{payload.get('order_id')}.json")
-            result = process_order(order_res['order'], force=True, inventory_qty=int(payload.get('inventory_qty', 1)))
+            result = process_order(order_res['order'], add_featured_tag=payload.get('add_featured_tag', False))
             self.send_json(200, result)
         else:
-            result = process_order(payload, force=False, inventory_qty=0)
+            result = process_order(payload, add_featured_tag=False)
             self.send_json(200, result)
