@@ -1,5 +1,6 @@
 # Manual order processing tool - allows you to process Shopify orders that were created manually
 # Visit: https://shopify-serial-webhook.vercel.app/api/process-order
+# IMPORTANT: Only processes products tagged "sample" - skips "featured" products
 
 import json
 import os
@@ -84,7 +85,7 @@ def log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date)
 
 def shopify_api_call(endpoint, method='GET', data=None):
     """Make API calls to Shopify"""
-    url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2024-01/{endpoint}"
+    url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2026-01/{endpoint}"
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_TOKEN,
         'Content-Type': 'application/json'
@@ -196,7 +197,7 @@ def get_order(order_number):
     return None
 
 def process_order(order_data):
-    """Process an order and assign serials"""
+    """Process an order and assign serials - ONLY for products tagged 'sample'"""
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
     
@@ -216,21 +217,47 @@ def process_order(order_data):
         product_title = item.get('title', '')
         sku = item.get('sku', '')
         quantity = item.get('quantity', 1)
+        current_qty = item.get('current_quantity', quantity)
+        product_id = item.get('product_id')
+        
+        print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
+        
+        # Skip removed line items
+        if not current_qty or current_qty == 0:
+            print(f"⏭️ Skipping removed line item: {product_title}")
+            continue
         
         # Check if cleartime product
-        is_cleartime = any(sku.upper().startswith(prefix) for prefix in CLEARTIME_SKU_PREFIXES)
+        is_cleartime = any(sku.upper().startswith(prefix) for prefix in CLEARTIME_SKU_PREFIXES) if sku else False
         
-        if sku and sku.upper().startswith('LCK-') and not product_title.startswith('--'):
-            # Process LCK products
-            for i in range(quantity):
+        if sku and sku.upper().startswith('LCK-'):
+            # Process LCK products - ONLY if tagged "sample"
+            product_result = shopify_api_call(f'products/{product_id}.json')
+            if product_result:
+                tags = product_result.get('product', {}).get('tags', '')
+                tags_list = [tag.strip().lower() for tag in tags.split(',') if tag.strip()]
+                
+                if 'featured' in tags_list:
+                    print(f"⏭️ Skipping - product tagged 'featured'")
+                    continue
+                if 'sample' not in tags_list:
+                    print(f"⏭️ Skipping - product not tagged 'sample'")
+                    continue
+                
+                print(f"✓ Product tagged 'sample' - processing")
+            else:
+                print(f"⚠️ Could not fetch product tags - skipping for safety")
+                continue
+            
+            for i in range(current_qty):
                 serial = get_next_lck_serial()
                 if serial:
                     lck_serials.append(serial)
                     log_to_lck_sheet(product_title, serial, order_number, customer_name, order_date)
         
-        elif sku and is_cleartime and not product_title.startswith('--'):
+        elif sku and is_cleartime:
             # Process cleartime products
-            for i in range(quantity):
+            for i in range(current_qty):
                 serial = get_next_cleartime_serial()
                 if serial:
                     cleartime_serials.append(serial)
@@ -262,11 +289,15 @@ class handler(BaseHTTPRequestHandler):
                 button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 3px; cursor: pointer; font-size: 16px; }
                 button:hover { background: #45a049; }
                 .note { color: #666; font-size: 14px; margin-top: 10px; }
+                .warning { background: #fff8e1; border: 1px solid #ffe082; border-radius: 5px; padding: 10px; margin: 15px 0; color: #7a5800; font-size: 14px; }
             </style>
         </head>
         <body>
             <h2>📦 Manual Order Processing</h2>
             <p>Use this tool to process orders created manually in Shopify Admin.</p>
+            <div class="warning">
+                ⚠️ <strong>Only processes products tagged "sample"</strong>. Products tagged "featured" are skipped.
+            </div>
             <form method="POST">
                 <label>Order Number:</label>
                 <input type="text" name="order_number" placeholder="2803 or #2803" required autofocus>
@@ -335,7 +366,7 @@ class handler(BaseHTTPRequestHandler):
                 serials_html += f"<p><strong>Cleartime Serials:</strong> {', '.join(result['cleartime_serials'])}</p>"
             
             if not result['lck_serials'] and not result['cleartime_serials']:
-                serials_html = '<p><em>No serials assigned (no LCK or cleartime products found)</em></p>'
+                serials_html = '<p><em>No serials assigned (no LCK or cleartime products found, or all were tagged "featured")</em></p>'
             
             html = f'''
             <!DOCTYPE html>

@@ -115,7 +115,7 @@ def swap_tags(tags_string):
         tags.append('featured')
     return ', '.join(tags)
 
-def create_product_from_sample(sample_product_id, serial, force=False, inventory_qty=1):
+def create_product_from_sample(sample_product_id, serial, inventory_qty=1):
     try:
         result = shopify_api_call(f'products/{sample_product_id}.json')
         if not result:
@@ -195,55 +195,89 @@ def try_acquire_processing_lock(order_id):
     except: return False
 
 def mark_order_as_completed(order_id):
-    completed_data = {
-        'metafield': {
-            'namespace': 'webhook',
-            'key': 'processing_completed',
-            'value': datetime.now().isoformat(),
-            'type': 'single_line_text_field'
-        }
-    }
-    shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data=completed_data)
+    try:
+        shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data={
+            'metafield': {
+                'namespace': 'webhook',
+                'key': 'processing_completed',
+                'value': datetime.now().isoformat(),
+                'type': 'single_line_text_field'
+            }
+        })
+        return True
+    except: return False
 
 def process_order(order_data, force=False, inventory_qty=1):
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
 
-    if not force:
-        if not try_acquire_processing_lock(order_id):
-            return {'status': 'already_processing', 'order': order_number}
+    if not force and not try_acquire_processing_lock(order_id):
+        return {'status': 'already_processing', 'order': order_number}
 
     try:
         customer = order_data.get('customer', {})
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
-        order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        created_at = order_data.get('created_at', '')
+        try:
+            order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        print(f"Processing order {order_number} (ID: {order_id}) force={force}")
 
         products_created = []
         serials_assigned = []
 
         for item in order_data.get('line_items', []):
-            product_id = item.get('product_id')
             product_title = item.get('title', '')
             sku = item.get('sku', '')
-            
-            # --- FIXED QUANTITY LOGIC ---
-            # Use current_quantity to handle removals. Fallback to original quantity.
-            current_qty = item.get('current_quantity', item.get('quantity', 1))
+            quantity = item.get('quantity', 1)
+            current_qty = item.get('current_quantity', quantity)
+            product_id = item.get('product_id')
 
-            if current_qty == 0:
-                print(f"⏭️ Skipping removed item: {product_title}")
+            print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
+
+            # Skip removed line items
+            if not current_qty or current_qty == 0:
+                print(f"⏭️ Skipping removed line item: {product_title}")
                 continue
 
+            # Skip non-clock products
             if not (sku and sku.upper().startswith('LCK-')):
+                print(f"⏭️ Skipping non-clock item: {sku}")
                 continue
 
-            for _ in range(current_qty):
-                serial = get_next_serial()
-                if not serial: continue
+            # ALWAYS check tags (applies to both webhook and manual trigger)
+            product_result = shopify_api_call(f'products/{product_id}.json')
+            if product_result:
+                tags = product_result.get('product', {}).get('tags', '')
+                tags_list = [tag.strip().lower() for tag in tags.split(',') if tag.strip()]
 
-                new_product = create_product_from_sample(product_id, serial, force=force, inventory_qty=inventory_qty)
+                if 'featured' in tags_list:
+                    print(f"⏭️ Skipping - product tagged 'featured'")
+                    continue
+                if 'sample' not in tags_list:
+                    print(f"⏭️ Skipping - product not tagged 'sample'")
+                    continue
+
+                print(f"✓ Product tagged 'sample' - creating individual product")
+            else:
+                print(f"⚠️ Could not fetch product tags - skipping for safety")
+                continue
+
+            for i in range(current_qty):
+                print(f"Processing item {i+1} of {current_qty}...")
+                serial = get_next_serial()
+                if not serial:
+                    print("✗ Failed to generate serial")
+                    continue
+
+                print(f"✓ Generated serial: {serial}")
+                serials_assigned.append(serial)
+
+                new_product = create_product_from_sample(product_id, serial, inventory_qty=inventory_qty)
                 if new_product:
-                    serials_assigned.append(serial)
                     products_created.append(new_product['title'])
                     log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
 
@@ -280,12 +314,13 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
   .removed-label { color: #d93025; font-weight: bold; text-decoration: none !important; }
   .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .75rem; background: #e8f0fe; color: #1a56db; margin-right: 4px; }
   .tag.sample { background: #fce8e6; color: #c0392b; }
+  .tag.featured { background: #e6f4ea; color: #1e7e34; }
   .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 14px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; display: none; margin-top: 16px; }
 </style>
 </head>
 <body>
 <h1>⚡ Manual Webhook Trigger</h1>
-<p style="color:#666">Force-process orders with your original build-type logic.</p>
+<p style="color:#666">Force-process orders. ONLY processes products tagged "sample".</p>
 
 <div class="card">
   <label>Order Number</label>
@@ -347,7 +382,7 @@ async function lookup() {
       tr.innerHTML = `
         <td>${item.title}</td>
         <td>${item.sku}</td>
-        <td>${item.tags.map(t => `<span class="tag ${t==='sample'?'sample':''}">${t}</span>`).join('')}</td>
+        <td>${item.tags.map(t => `<span class="tag ${t==='sample'?'sample':t==='featured'?'featured':''}">${t}</span>`).join('')}</td>
         <td>${isRemoved ? '<span class="removed-label">REMOVED (0)</span>' : item.current_qty}</td>
       `;
       tbody.appendChild(tr);
