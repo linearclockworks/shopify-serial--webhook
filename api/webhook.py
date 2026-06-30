@@ -159,8 +159,8 @@ def swap_order_line_item(order_id, old_product_id, new_product_id):
         
         # Step 2: Begin order edit
         begin_mutation = '''
-        mutation orderEditBegin($input: OrderEditBeginInput!) {
-          orderEditBegin(input: $input) {
+        mutation orderEditBegin($id: ID!) {
+          orderEditBegin(id: $id) {
             calculatedOrder {
               id
             }
@@ -172,19 +172,24 @@ def swap_order_line_item(order_id, old_product_id, new_product_id):
         }
         '''
         
-        begin_result = graphql_call(begin_mutation, {'input': {'orderId': f'gid://shopify/Order/{order_id}'}})
+        begin_result = graphql_call(begin_mutation, {'id': f'gid://shopify/Order/{order_id}'})
         
         if not begin_result or begin_result.get('errors'):
             print(f"✗ orderEditBegin failed: {begin_result}")
             return False
         
-        calculated_order_id = begin_result['data']['orderEditBegin']['calculatedOrder']['id']
+        data = begin_result.get('data', {})
+        if not data.get('orderEditBegin'):
+            print(f"✗ orderEditBegin returned no data: {begin_result}")
+            return False
+        
+        calculated_order_id = data['orderEditBegin']['calculatedOrder']['id']
         print(f"✓ Order edit session started: {calculated_order_id}")
         
         # Step 3: Remove old line item
         remove_mutation = '''
-        mutation orderEditRemoveLineItem($input: OrderEditRemoveLineItemInput!) {
-          orderEditRemoveLineItem(input: $input) {
+        mutation orderEditRemoveLineItem($calculatedOrderId: ID!, $lineItemId: ID!) {
+          orderEditRemoveLineItem(calculatedOrderId: $calculatedOrderId, lineItemId: $lineItemId) {
             calculatedOrder {
               id
             }
@@ -197,10 +202,8 @@ def swap_order_line_item(order_id, old_product_id, new_product_id):
         '''
         
         remove_result = graphql_call(remove_mutation, {
-            'input': {
-                'calculatedOrderId': calculated_order_id,
-                'lineItemId': f'gid://shopify/LineItem/{old_line_item_id}'
-            }
+            'calculatedOrderId': calculated_order_id,
+            'lineItemId': f'gid://shopify/LineItem/{old_line_item_id}'
         })
         
         if not remove_result or remove_result.get('errors'):
@@ -211,8 +214,8 @@ def swap_order_line_item(order_id, old_product_id, new_product_id):
         
         # Step 4: Add new product variant
         add_mutation = '''
-        mutation orderEditAddVariant($input: OrderEditAddVariantInput!) {
-          orderEditAddVariant(input: $input) {
+        mutation orderEditAddVariant($calculatedOrderId: ID!, $variantId: ID!, $quantity: Int!) {
+          orderEditAddVariant(calculatedOrderId: $calculatedOrderId, variantId: $variantId, quantity: $quantity) {
             calculatedOrder {
               id
             }
@@ -225,11 +228,9 @@ def swap_order_line_item(order_id, old_product_id, new_product_id):
         '''
         
         add_result = graphql_call(add_mutation, {
-            'input': {
-                'calculatedOrderId': calculated_order_id,
-                'variantId': f'gid://shopify/ProductVariant/{new_variant_id}',
-                'quantity': 1
-            }
+            'calculatedOrderId': calculated_order_id,
+            'variantId': f'gid://shopify/ProductVariant/{new_variant_id}',
+            'quantity': 1
         })
         
         if not add_result or add_result.get('errors'):
@@ -240,8 +241,8 @@ def swap_order_line_item(order_id, old_product_id, new_product_id):
         
         # Step 5: Commit the order edit
         commit_mutation = '''
-        mutation orderEditCommit($input: OrderEditCommitInput!) {
-          orderEditCommit(input: $input) {
+        mutation orderEditCommit($calculatedOrderId: ID!) {
+          orderEditCommit(calculatedOrderId: $calculatedOrderId, notifyCustomer: false) {
             order {
               id
             }
@@ -254,10 +255,7 @@ def swap_order_line_item(order_id, old_product_id, new_product_id):
         '''
         
         commit_result = graphql_call(commit_mutation, {
-            'input': {
-                'calculatedOrderId': calculated_order_id,
-                'notifyCustomer': False
-            }
+            'calculatedOrderId': calculated_order_id
         })
         
         if not commit_result or commit_result.get('errors'):
