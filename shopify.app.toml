@@ -1,0 +1,18 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "6866008eb0b9baff99b2597ea21b065f"
+application_url = "https://shopify-serial-webhook.vercel.app"
+embedded = true
+name = "Linear Clockworks Serial Mgr"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "write_inventory,read_inventory,read_metaobjects,write_metaobjects,read_orders,write_orders,read_products,write_products,read_locations"
+optional_scopes = [ "write_order_edits", "read_order_edits", "read_publications"]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ ]
+
+[webhooks]
+api_version = "2026-01"
