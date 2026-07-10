@@ -185,7 +185,7 @@ def set_inventory_at_location(inventory_item_id, location_id, quantity):
         print(f"⚠️ Inventory processing failed at location {location_id}: {e}")
         return False
 
-def create_product_from_sample(sample_product_id, serial, add_featured_tag=False):
+def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None):
     try:
         result = shopify_api_call(f'products/{sample_product_id}.json')
         if not result:
@@ -202,7 +202,19 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
         
         images = [{'src': img.get('src')} for img in sample.get('images', [])]
         variants = sample.get('variants', [])
-        price = variants[0].get('price') if variants else '0.00'
+        
+        # --- SKU FIXED MATCHING ---
+        # Look through all product variants to match the exact SKU ordered
+        price = '0.00'
+        if variants:
+            price = variants[0].get('price', '0.00')  # Default fallback base price
+            if purchased_sku:
+                for v in variants:
+                    v_sku = v.get('sku', '')
+                    if v_sku and v_sku.strip().lower() == purchased_sku.strip().lower():
+                        price = v.get('price', price)
+                        print(f"✓ Match found! Variant SKU '{v_sku}' price used: ${price}")
+                        break
 
         new_product = {
             'product': {
@@ -485,7 +497,7 @@ def process_order(order_data, add_featured_tag=False):
                 print(f"✓ Generated serial: {serial}")
                 serials_assigned.append(serial)
 
-                new_product = create_product_from_sample(product_id, serial, add_featured_tag=add_featured_tag)
+                new_product = create_product_from_sample(product_id, serial, add_featured_tag=add_featured_tag, purchased_sku=sku)
                 if new_product:
                     products_created.append(new_product['title'])
                     log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
