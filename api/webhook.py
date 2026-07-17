@@ -430,12 +430,14 @@ def mark_order_as_completed(order_id):
         return True
     except: return False
 
-def process_order(order_data, add_featured_tag=False):
+def process_order(order_data, add_featured_tag=False, force=False):
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
 
-    if not try_acquire_processing_lock(order_id):
-        return {'status': 'already_processing', 'order': order_number}
+    # ONLY check the lock if we are NOT forcing it
+    if not force:
+        if not try_acquire_processing_lock(order_id):
+            return {'status': 'already_processing', 'order': order_number}
 
     try:
         customer = order_data.get('customer', {})
@@ -690,8 +692,10 @@ class handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(content_length))
         if self.path == '/api/manual':
             order_res = shopify_api_call(f"orders/{payload.get('order_id')}.json")
-            result = process_order(order_res['order'], add_featured_tag=payload.get('add_featured_tag', False))
+            
+            # --- FIXED: ADDED force=True HERE ---
+            result = process_order(order_res['order'], add_featured_tag=payload.get('add_featured_tag', False), force=True)
             self.send_json(200, result)
         else:
-            result = process_order(payload, add_featured_tag=False)
+            result = process_order(payload, add_featured_tag=False, force=False)
             self.send_json(200, result)
