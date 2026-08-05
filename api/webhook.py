@@ -1,12 +1,11 @@
-# Summary: When a customer orders a "sample" tagged clock, this webhook automatically:
-# 1. Generates a unique serial number (LCK-####)
-# 2. Creates a new Shopify product with serial in name (e.g., "Elena-1028")
-# 3. Copies photos, description, price from sample product
-# 4. Strips "sample" tag, adds "featured" to new product
-# 5. Logs to Clocksheet with hyperlink to new product
-# 6. Swaps out the "sample" line item on the order for the new serialized product via GraphQL
-# 7. Adds serial number to order notes as a fallback if a swap fails
-# 8. Prevents duplicate processing with atomic locking
+# Summary: Unified Webhook & Manual Processing Hub
+# 1. Handles both Hardwood (LCK-) and Cleartime (CT, FA, MP, KIT, LED) orders.
+# 2. Generates unique serial numbers (LCK-#### for Hardwood, numbers for Cleartime).
+# 3. For Hardwood: Creates a new Shopify product with serial in name.
+# 4. For Hardwood: Matches variant SKU pricing accurately.
+# 5. For Hardwood: Swaps out line item on order via GraphQL.
+# 6. Logs to respective Google Sheets (Clocks vs CTClocks).
+# 7. Prevents duplicate processing with atomic locking.
 
 import json
 import os
@@ -19,26 +18,35 @@ from http.server import BaseHTTPRequestHandler
 SHOPIFY_SHOP = os.environ.get('SHOPIFY_SHOP_NAME', '')
 SHOPIFY_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
+GOOGLE_SHEET_ID_CLEARTIME = os.environ.get('GOOGLE_SHEET_ID_CLEARTIME', '')
 GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
-def get_google_sheet():
+CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED']
+
+def get_google_sheet(is_cleartime=False):
+    """Connect to either the Clocks or CTClocks Google Sheet worksheet"""
     try:
         import gspread
         from google.oauth2.service_account import Credentials
+        
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
         scopes = ['https://www.googleapis.com/auth/spreadsheets']
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        
         client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
-        sheet = spreadsheet.worksheet('Clocks')
+        sheet_id = GOOGLE_SHEET_ID_CLEARTIME if is_cleartime else GOOGLE_SHEET_ID
+        spreadsheet = client.open_by_key(sheet_id)
+        sheet_name = 'CTClocks' if is_cleartime else 'Clocks'
+        sheet = spreadsheet.worksheet(sheet_name)
         return sheet
     except Exception as e:
         print(f"Sheet error: {e}")
         return None
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date, product_id):
+    """Add a new row to the main LCK Clocks Google Sheet with hyperlink"""
     try:
-        sheet = get_google_sheet()
+        sheet = get_google_sheet(is_cleartime=False)
         if not sheet:
             return False
 
@@ -62,16 +70,42 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
 
         try:
             sheet.update_cell(2, 2, f'=HYPERLINK("{product_url}", "{name_part}")')
-            print(f"✓ Logged to sheet with hyperlink: {serial}")
+            print(f"✓ Logged to Clocks sheet with hyperlink: {serial}")
         except Exception as e:
-            print(f"⚠️ Logged to sheet but hyperlink failed: {e}")
+            print(f"⚠️ Logged to Clocks sheet but hyperlink failed: {e}")
 
         return True
     except Exception as e:
         print(f"✗ Sheet error: {e}")
         return False
 
+def log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date):
+    """Add a new row to the CTClocks Google Sheet"""
+    try:
+        sheet = get_google_sheet(is_cleartime=True)
+        if not sheet:
+            return False
+        
+        row = [
+            serial,          # A: Serial number
+            sku,             # B: SKU
+            '',              # C: Event tags (empty)
+            order_number,    # D: Order number
+            customer_name,   # E: Customer name
+            '',              # F: Run length
+            '',              # G: Steps
+            '',              # H: Comments
+        ]
+        
+        sheet.insert_row(row, index=2)
+        print(f"✓ Logged to CTClocks sheet: {serial}")
+        return True
+    except Exception as e:
+        print(f"✗ CTClocks sheet error: {e}")
+        return False
+
 def shopify_api_call(endpoint, method='GET', data=None):
+    """Utility wrapper for executing REST API calls against Shopify Admin"""
     url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2026-01/{endpoint}"
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_TOKEN,
@@ -106,8 +140,9 @@ def shopify_graphql_call(query, variables=None):
         print(f"✗ GraphQL API Error: {e}")
         return None
 
-def get_next_serial():
-    result = shopify_api_call('metafields.json?namespace=custom&key=global_serial_counter')
+def get_next_serial(key='global_serial_counter', prefix='LCK-'):
+    """Fetch next serial from Shopify Metafields counter and increment"""
+    result = shopify_api_call(f'metafields.json?namespace=custom&key={key}')
     if not result:
         return None
     metafields = result.get('metafields', [])
@@ -115,7 +150,7 @@ def get_next_serial():
         mf = metafields[0]
         current = int(mf['value'])
         metafield_id = mf['id']
-        serial = f"LCK-{current}"
+        serial = f"{prefix}{current}" if prefix else str(current)
         next_val = current + 1
         update_data = {
             'metafield': {
@@ -137,13 +172,12 @@ def swap_tags(tags_string, add_featured_tag=False):
         if 'featured' not in [t.lower() for t in tags]:
             tags.append('featured')
     else:
-        # Remove featured tag for customer orders (hidden from site)
         tags = [t for t in tags if t.lower() != 'featured']
     
     return ', '.join(tags)
 
 def get_location_id_by_name(location_name):
-    """Get location ID by location name (e.g., 'SandedNBranded', 'Brevard')"""
+    """Get Shopify location ID by location name"""
     try:
         result = shopify_api_call('locations.json')
         if result and result.get('locations'):
@@ -156,19 +190,17 @@ def get_location_id_by_name(location_name):
         return None
 
 def set_inventory_at_location(inventory_item_id, location_id, quantity):
-    """Ensure inventory item is connected to the targeted location, then cleanly set quantity"""
+    """Connect inventory item to target location and set available level"""
     if not inventory_item_id or not location_id:
         print(f"✗ Cannot configure inventory: item_id or location_id is missing.")
         return False
     try:
-        # Step A: Connect the inventory item to the location first (prevents 400 Bad Requests)
         connect_data = {
             'inventory_item_id': int(inventory_item_id),
             'location_id': int(location_id)
         }
         shopify_api_call('inventory_levels/connect.json', method='POST', data=connect_data)
         
-        # Step B: Apply flat payload layout configuration to set inventory levels
         adjust_data = {
             'inventory_item_id': int(inventory_item_id),
             'location_id': int(location_id),
@@ -186,6 +218,7 @@ def set_inventory_at_location(inventory_item_id, location_id, quantity):
         return False
 
 def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None):
+    """Create a new product based on the sample product with exact SKU matching"""
     try:
         result = shopify_api_call(f'products/{sample_product_id}.json')
         if not result:
@@ -203,11 +236,10 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
         images = [{'src': img.get('src')} for img in sample.get('images', [])]
         variants = sample.get('variants', [])
         
-        # --- SKU FIXED MATCHING ---
         # Look through all product variants to match the exact SKU ordered
         price = '0.00'
         if variants:
-            price = variants[0].get('price', '0.00')  # Default fallback base price
+            price = variants[0].get('price', '0.00')
             if purchased_sku:
                 for v in variants:
                     v_sku = v.get('sku', '')
@@ -244,7 +276,6 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
             new_variant_id = variant.get('id')
             inventory_item_id = variant.get('inventory_item_id')
             
-            # Safeguard Recovery: If inventory_item_id is omitted from direct post return, query item directly
             if not inventory_item_id and new_variant_id:
                 print("🔄 Fetching complete variant payload to resolve inventory tracking records...")
                 variant_res = shopify_api_call(f'variants/{new_variant_id}.json')
@@ -256,9 +287,9 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
                 if sanded_location_id:
                     set_inventory_at_location(inventory_item_id, sanded_location_id, 1)
                     tag_status = "featured (visible)" if add_featured_tag else "no featured tag (hidden)"
-                    print(f"✓ Created from 'sample' tag → qty=1 at both locations, {tag_status}")
+                    print(f"✓ Created from 'sample' tag → qty=1 at location, {tag_status}")
                 else:
-                    print(f"⚠️ Could not find 'SandedNBranded' location - product only available at default location")
+                    print(f"⚠️ Could not find 'SandedNBranded' location - using default location")
             
             return {'product_id': new_product_id, 'variant_id': new_variant_id, 'title': new_title}
         return None
@@ -267,10 +298,9 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
         return None
 
 def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
-    """Executes the complete GraphQL sequence to swap out the sample for the unique item on an active order layout"""
+    """Executes GraphQL sequence to swap out the sample for the serialized product on an order"""
     print(f"Starting line item swap sequence for Order ID: {order_id}")
     
-    # Step 1: Open Edit Session
     begin_mutation = """
     mutation orderEditBegin($id: ID!) {
       orderEditBegin(id: $id) {
@@ -280,21 +310,16 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
     }
     """
     res = shopify_graphql_call(begin_mutation, {"id": f"gid://shopify/Order/{order_id}"})
-    if not res:
-        return False, "orderEditBegin connection failure or empty response"
-    if 'errors' in res:
-        return False, f"orderEditBegin GraphQL top-level error: {res['errors']}"
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditBegin'):
+        return False, f"orderEditBegin error: {res}"
     
-    edit_data = res.get('data', {}).get('orderEditBegin')
-    if not edit_data:
-        return False, f"orderEditBegin returned no data block: {res}"
+    edit_data = res['data']['orderEditBegin']
     if edit_data.get('userErrors'):
         return False, f"orderEditBegin user error: {edit_data['userErrors'][0]['message']}"
         
     calc_order_id = edit_data['calculatedOrder']['id']
     print(f"✓ Order edit session started: {calc_order_id}")
     
-    # Step 2: Try both standard GID formats to handle mutations robustly across edge case triggers
     line_item_gids = [
         f"gid://shopify/LineItem/{old_line_item_id}",
         f"gid://shopify/CalculatedLineItem/{old_line_item_id}"
@@ -313,38 +338,21 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
     last_error_msg = ""
     
     for item_gid in line_item_gids:
-        print(f"Attempting quantity adjustment to 0 using: {item_gid}")
         res = shopify_graphql_call(remove_mutation, {
             "id": calc_order_id, 
             "lineItemId": item_gid, 
             "quantity": 0
         })
-        
-        if not res:
-            last_error_msg = "orderEditSetQuantity returned network connection failure"
-            continue
-        if 'errors' in res:
-            last_error_msg = f"orderEditSetQuantity GraphQL schema error: {res['errors']}"
-            continue
+        if res and 'data' in res and res['data'].get('orderEditSetQuantity') and not res['data']['orderEditSetQuantity'].get('userErrors'):
+            print(f"✓ Successfully staged removal of sample line item using {item_gid.split('/')[-2]}")
+            swap_success = True
+            break
+        else:
+            last_error_msg = f"orderEditSetQuantity error: {res}"
             
-        remove_data = res.get('data', {}).get('orderEditSetQuantity')
-        if not remove_data:
-            last_error_msg = f"orderEditSetQuantity missing data block: {res}"
-            continue
-            
-        if remove_data.get('userErrors'):
-            last_error_msg = f"orderEditSetQuantity logic error: {remove_data['userErrors'][0]['message']}"
-            continue
-            
-        # If we successfully make it here, our GID format passed validation!
-        print(f"✓ Successfully staged removal of sample line item using {item_gid.split('/')[-2]}")
-        swap_success = True
-        break
-        
     if not swap_success:
-        return False, f"All line item removal pathways exhausted. Details: {last_error_msg}"
+        return False, f"Line item removal failed. Details: {last_error_msg}"
 
-    # Step 3: Add New Serialized Variant Product
     add_mutation = """
     mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
       orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
@@ -358,15 +366,11 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
         "variantId": f"gid://shopify/ProductVariant/{new_variant_id}", 
         "quantity": 1
     })
-    if not res or 'errors' in res or not res.get('data', {}).get('orderEditAddVariant'):
-        return False, f"orderEditAddVariant structural/payload failure: {res}"
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditAddVariant') or res['data']['orderEditAddVariant'].get('userErrors'):
+        return False, f"orderEditAddVariant failure: {res}"
         
-    add_data = res['data']['orderEditAddVariant']
-    if add_data.get('userErrors'):
-        return False, f"orderEditAddVariant logic error: {add_data['userErrors'][0]['message']}"
     print(f"✓ Successfully staged addition of serialized unique variant")
 
-    # Step 4: Commit transaction changes to live order records
     commit_mutation = """
     mutation orderEditCommit($id: ID!) {
       orderEditCommit(id: $id) {
@@ -376,31 +380,40 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
     }
     """
     res = shopify_graphql_call(commit_mutation, {"id": calc_order_id})
-    if not res or 'errors' in res or not res.get('data', {}).get('orderEditCommit'):
-        return False, f"orderEditCommit structural/payload failure: {res}"
-        
-    commit_data = res['data']['orderEditCommit']
-    if commit_data.get('userErrors'):
-        return False, f"orderEditCommit logic error: {commit_data['userErrors'][0]['message']}"
+    if not res or 'errors' in res or not res.get('data', {}).get('orderEditCommit') or res['data']['orderEditCommit'].get('userErrors'):
+        return False, f"orderEditCommit failure: {res}"
         
     return True, "Success"
 
-def add_serial_to_order_note(order_id, serial, swap_status=None):
+def add_serial_to_order_note(order_id, lck_serials, cleartime_serials, swap_status=None):
+    """Append serial numbers to order notes"""
     try:
         result = shopify_api_call(f'orders/{order_id}.json')
-        if not result: return False
+        if not result:
+            return False
+        
         order = result.get('order', {})
         current_note = order.get('note', '') or ''
         
+        note_parts = []
         status_text = f" ({swap_status})" if swap_status else ""
-        note_addition = f"\nSerial Number: {serial}{status_text}"
-        new_note = f"{current_note}{note_addition}" if current_note else note_addition.strip()
+        
+        if lck_serials:
+            note_parts.append(f"Serial Number: {', '.join(lck_serials)}{status_text}")
+        if cleartime_serials:
+            note_parts.append(f"Cleartime Serial Numbers: {', '.join(cleartime_serials)}")
+        
+        serial_text = '\n'.join(note_parts)
+        new_note = f"{current_note}\n{serial_text}" if current_note else serial_text
         
         shopify_api_call(f'orders/{order_id}.json', method='PUT', data={'order': {'note': new_note}})
         return True
-    except: return False
+    except Exception as e:
+        print(f"✗ Error updating note: {e}")
+        return False
 
 def try_acquire_processing_lock(order_id):
+    """Atomic locking mechanism to avoid duplicate webhooks"""
     try:
         result = shopify_api_call(f'orders/{order_id}/metafields.json?namespace=webhook&key=processing_lock')
         if result and result.get('metafields'):
@@ -415,9 +428,11 @@ def try_acquire_processing_lock(order_id):
         }
         shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data=lock_data)
         return True
-    except: return False
+    except:
+        return False
 
 def mark_order_as_completed(order_id):
+    """Mark order completed with metafield tag"""
     try:
         shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data={
             'metafield': {
@@ -428,31 +443,31 @@ def mark_order_as_completed(order_id):
             }
         })
         return True
-    except: return False
+    except:
+        return False
 
 def process_order(order_data, add_featured_tag=False, force=False):
+    """Process an order for both Hardwood and Cleartime clocks"""
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
 
-    # ONLY check the lock if we are NOT forcing it
-    if not force:
-        if not try_acquire_processing_lock(order_id):
-            return {'status': 'already_processing', 'order': order_number}
+    if not force and not try_acquire_processing_lock(order_id):
+        return {'status': 'already_processing', 'order': order_number}
 
     try:
         customer = order_data.get('customer', {})
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
-
         created_at = order_data.get('created_at', '')
         try:
             order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
         except:
             order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        print(f"Processing order {order_number} (ID: {order_id}) add_featured_tag={add_featured_tag}")
+        print(f"Processing order {order_number} (ID: {order_id}) force={force}")
 
         products_created = []
-        serials_assigned = []
+        lck_serials = []
+        cleartime_serials = []
 
         for item in order_data.get('line_items', []):
             product_title = item.get('title', '')
@@ -464,59 +479,69 @@ def process_order(order_data, add_featured_tag=False, force=False):
 
             print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
 
+            # Skip removed items from order edits
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
                 continue
 
-            if not (sku and sku.upper().startswith('LCK-')):
-                print(f"⏭️ Skipping non-clock item: {sku}")
-                continue
+            is_cleartime = any(sku.upper().startswith(p) for p in CLEARTIME_SKU_PREFIXES) if sku else False
 
-            product_result = shopify_api_call(f'products/{product_id}.json')
-            if product_result:
-                tags = product_result.get('product', {}).get('tags', '')
-                tags_list = [tag.strip().lower() for tag in tags.split(',') if tag.strip()]
+            # Hardwood Clocks (SKU starts with LCK-)
+            if sku and sku.upper().startswith('LCK-'):
+                product_result = shopify_api_call(f'products/{product_id}.json')
+                if product_result:
+                    tags = product_result.get('product', {}).get('tags', '')
+                    tags_list = [tag.strip().lower() for tag in tags.split(',') if tag.strip()]
 
-                if 'featured' in tags_list:
-                    print(f"⏭️ Skipping - product tagged 'featured'")
-                    continue
-                if 'sample' not in tags_list:
-                    print(f"⏭️ Skipping - product not tagged 'sample'")
-                    continue
-
-                print(f"✓ Product tagged 'sample' - creating individual product")
-            else:
-                print(f"⚠️ Could not fetch product tags - skipping for safety")
-                continue
-
-            for i in range(current_qty):
-                print(f"Processing item {i+1} of {current_qty}...")
-                serial = get_next_serial()
-                if not serial:
-                    print("✗ Failed to generate serial")
+                    if 'featured' in tags_list:
+                        print(f"⏭️ Skipping - product tagged 'featured'")
+                        continue
+                    if 'sample' not in tags_list:
+                        print(f"⏭️ Skipping - product not tagged 'sample'")
+                        continue
+                else:
+                    print(f"⚠️ Could not fetch product tags - skipping for safety")
                     continue
 
-                print(f"✓ Generated serial: {serial}")
-                serials_assigned.append(serial)
+                for i in range(current_qty):
+                    serial = get_next_serial(key='global_serial_counter', prefix='LCK-')
+                    if not serial:
+                        continue
 
-                new_product = create_product_from_sample(product_id, serial, add_featured_tag=add_featured_tag, purchased_sku=sku)
-                if new_product:
-                    products_created.append(new_product['title'])
-                    log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
+                    lck_serials.append(serial)
+                    new_product = create_product_from_sample(product_id, serial, add_featured_tag=add_featured_tag, purchased_sku=sku)
                     
-                    # Run the live financial layout swap sequence
-                    swap_success, swap_msg = execute_line_item_swap(order_id, line_item_id, new_product['variant_id'])
-                    if swap_success:
-                        print(f"✓ GraphQL order swap complete: {serial} is now explicitly on the order sheet")
-                        add_serial_to_order_note(order_id, serial, swap_status="Swapped successfully")
-                    else:
-                        print(f"⚠️ GraphQL order swap fallback triggered: {swap_msg}")
-                        add_serial_to_order_note(order_id, serial, swap_status="Note fallback only")
+                    if new_product:
+                        products_created.append(new_product['title'])
+                        log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
+                        
+                        swap_success, swap_msg = execute_line_item_swap(order_id, line_item_id, new_product['variant_id'])
+                        swap_status = "Swapped successfully" if swap_success else "Note fallback only"
+                        print(f"Order swap status for {serial}: {swap_status} ({swap_msg if not swap_success else ''})")
 
-        mark_order_as_completed(order_id)
-        return {'status': 'success', 'products': products_created, 'serials': serials_assigned, 'order': order_number}
+            # Cleartime Clocks (SKU starts with CT, FA, MP, KIT, LED)
+            elif sku and is_cleartime:
+                for i in range(current_qty):
+                    serial = get_next_serial(key='cleartime_serial_counter', prefix='')
+                    if serial:
+                        cleartime_serials.append(serial)
+                        log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date)
+
+        if lck_serials or cleartime_serials:
+            add_serial_to_order_note(order_id, lck_serials, cleartime_serials)
+
+        if not force:
+            mark_order_as_completed(order_id)
+
+        return {
+            'status': 'success',
+            'order': order_number,
+            'products': products_created,
+            'lck_serials': lck_serials,
+            'cleartime_serials': cleartime_serials
+        }
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR during processing: {e}")
         raise
 
 # ── Manual trigger UI ────────────────────────────────────────────────────────
@@ -525,36 +550,44 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Manual Webhook Trigger</title>
+<title>Master Webhook Trigger</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  body { margin: 0; padding: 24px; font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; background: #f6f8fa; color: #111; }
+  body { margin: 0; padding: 24px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f6f8fa; color: #111; }
+  h1 { margin: 0 0 6px; font-size: 1.4rem; }
   .card { background: #fff; border: 1px solid #e1e4e8; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
   label { font-weight: 600; font-size: .9rem; display: block; margin-bottom: 6px; }
   input[type=text] { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 1rem; }
-  button { margin-top: 12px; padding: 10px 20px; background: #0b61d8; color: #fff; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; }
+  button { margin-top: 12px; padding: 10px 20px; background: #0b61d8; color: #fff; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; font-weight: 600; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   table { width: 100%; border-collapse: collapse; margin-top: 15px; }
   th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: .9rem; }
-  th { background: #f7f9fc; }
+  th { background: #f7f9fc; font-weight: 600; }
   .removed-row td { text-decoration: line-through; color: #999; }
   .removed-label { color: #d93025; font-weight: bold; text-decoration: none !important; }
   .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .75rem; background: #e8f0fe; color: #1a56db; margin-right: 4px; }
   .tag.sample { background: #fce8e6; color: #c0392b; }
   .tag.featured { background: #e6f4ea; color: #1e7e34; }
   .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 14px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; display: none; margin-top: 16px; }
+  .info-box { background: #eef3fc; border: 1px solid #c7d8f8; border-radius: 8px; padding: 12px 15px; margin-bottom: 20px; font-size: 0.9rem; color: #1a3e75; line-height: 1.5; }
+  a { color: #0b61d8; text-decoration: none; font-weight: 500; }
+  a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
-<h1>⚡ Manual Webhook Trigger</h1>
-<p style="color:#666">Force-process orders. ONLY processes products tagged "sample".</p>
+<h1>⚡ Master Webhook Trigger</h1>
+<div class="info-box">
+  Processes both <strong>Hardwood (LCK-)</strong> and <strong>Cleartime (CT, FA, MP, KIT, LED)</strong> clocks.<br>
+  • <strong>Hardwood:</strong> Clones sample product, swaps line item, logs to <a href="https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID" target="_blank">Clocks Spreadsheet ↗</a><br>
+  • <strong>Cleartime:</strong> Generates serial number, updates notes, logs to <a href="https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID_CLEARTIME" target="_blank">CTClocks Spreadsheet ↗</a>
+</div>
 
 <div class="card">
-  <label>Order Number</label>
-  <input type="text" id="orderInput" placeholder="2882">
+  <label for="orderInput">Order Number</label>
+  <input type="text" id="orderInput" placeholder="2882 or #2882">
   
-  <div style="margin-top:14px;">
-    <label style="font-weight:600; font-size:.9rem;">Build Type (both create with qty=1, tagged difference controls visibility)</label>
+  <div style="margin-top:16px;">
+    <label style="font-weight:600; font-size:.9rem;">Build Type (for Hardwood LCK- clocks only)</label>
     <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
       <label style="display:flex; align-items:center; gap:6px; font-weight:400; cursor:pointer;">
         <input type="radio" name="buildType" value="stock">
@@ -571,7 +604,14 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
 
   <div id="orderInfo" style="display:none">
     <table>
-      <thead><tr><th>Product</th><th>SKU</th><th>Tags</th><th>Qty</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>SKU</th>
+          <th>Tags</th>
+          <th>Qty</th>
+        </tr>
+      </thead>
       <tbody id="itemsBody"></tbody>
     </table>
     <button style="background:#c0392b" id="fireBtn">🔥 Force Process This Order</button>
@@ -583,16 +623,17 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
 let currentOrderId = null;
 
 async function lookup() {
-  const val = document.getElementById('orderInput').value.trim().replace('#','');
-  if (!val) return;
+  const raw = document.getElementById('orderInput').value.trim().replace('#','');
+  if (!raw) return;
   const btn = document.getElementById('lookupBtn');
   btn.disabled = true;
   btn.textContent = 'Searching...';
+  document.getElementById('orderInfo').style.display = 'none';
   
   try {
-    const resp = await fetch('/api/lookup?order=' + val);
+    const resp = await fetch('/api/lookup?order=' + encodeURIComponent(raw));
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error);
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
 
     currentOrderId = data.order_id;
     const tbody = document.getElementById('itemsBody');
@@ -601,15 +642,20 @@ async function lookup() {
     let validItems = 0;
     data.items.forEach(item => {
       const isRemoved = item.current_qty === 0;
-      if(!isRemoved) validItems++;
+      if (!isRemoved) validItems++;
       
       const tr = document.createElement('tr');
       if (isRemoved) tr.className = 'removed-row';
       
+      const tagsHtml = item.tags.map(t => {
+        const cls = t === 'sample' ? 'tag sample' : t === 'featured' ? 'tag featured' : 'tag';
+        return `<span class="${cls}">${t}</span>`;
+      }).join('');
+
       tr.innerHTML = `
         <td>${item.title}</td>
-        <td>${item.sku}</td>
-        <td>${item.tags.map(t => `<span class="tag ${t==='sample'?'sample':t==='featured'?'featured':''}">${t}</span>`).join('')}</td>
+        <td>${item.sku || '—'}</td>
+        <td>${tagsHtml || '—'}</td>
         <td>${isRemoved ? '<span class="removed-label">REMOVED (0)</span>' : item.current_qty}</td>
       `;
       tbody.appendChild(tr);
@@ -617,85 +663,183 @@ async function lookup() {
 
     document.getElementById('fireBtn').disabled = validItems === 0;
     document.getElementById('orderInfo').style.display = 'block';
-  } catch(e) { alert(e.message); }
-  finally { btn.disabled = false; btn.textContent = 'Look Up Order'; }
+    document.getElementById('logBox').style.display = 'none';
+  } catch(e) { 
+    alert('Lookup Error: ' + e.message); 
+  } finally { 
+    btn.disabled = false; 
+    btn.textContent = 'Look Up Order'; 
+  }
 }
 
 async function fire() {
+  if (!currentOrderId) return;
+  if (!confirm('Force-process this order? Serial numbers will be assigned and Google Sheets updated.')) return;
+
   const btn = document.getElementById('fireBtn');
   const log = document.getElementById('logBox');
   btn.disabled = true;
+  btn.textContent = 'Processing...';
   log.style.display = 'block';
-  log.textContent = 'Processing...';
+  log.textContent = 'Sending request...';
 
   try {
     const buildType = document.querySelector('input[name=buildType]:checked').value;
     const resp = await fetch('/api/manual', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         order_id: currentOrderId,
         add_featured_tag: buildType === 'stock'
       })
     });
     const res = await resp.json();
+    if (!resp.ok) throw new Error(res.error || resp.statusText);
+
     log.textContent = JSON.stringify(res, null, 2);
     btn.textContent = '✓ Complete';
-  } catch(e) { log.textContent = 'Error: ' + e.message; btn.disabled = false; }
+  } catch(e) { 
+    log.textContent = 'Error: ' + e.message; 
+    btn.disabled = false; 
+    btn.textContent = '🔥 Force Process This Order';
+  }
 }
 
 document.getElementById('lookupBtn').addEventListener('click', lookup);
+document.getElementById('orderInput').addEventListener('keydown', e => { if (e.key === 'Enter') lookup(); });
 document.getElementById('fireBtn').addEventListener('click', fire);
 </script>
 </body>
 </html>
 """
 
-# ── Handler ──────────────────────────────────────────────────────────────────
+# ── Serverless Route Handler ──────────────────────────────────────────────────
 
 class handler(BaseHTTPRequestHandler):
+    
     def send_json(self, code, data):
-        body = json.dumps(data).encode()
+        body = json.dumps(data).encode('utf-8')
         self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_html(self, html):
+        body = html.encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', len(body))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
-        p = urlparse(self.path)
-        if p.path in ('/', '/api', '/api/'):
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html')
-            self.end_headers()
-            self.wfile.write(MANUAL_TRIGGER_HTML.encode())
-        elif p.path == '/api/lookup':
-            order_num = parse_qs(p.query).get('order', [''])[0]
-            res = shopify_api_call(f'orders.json?name=%23{order_num}&status=any')
-            if not res or not res.get('orders'): return self.send_json(404, {'error': 'Order not found'})
+        parsed = urlparse(self.path)
+
+        # Serve the Manual UI on root routes
+        if parsed.path in ('/', '/api', '/api/'):
+            # Replace placeholder link tags with real Google Sheet links
+            lck_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}" if GOOGLE_SHEET_ID else "#"
+            ct_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID_CLEARTIME}" if GOOGLE_SHEET_ID_CLEARTIME else "#"
             
-            order = res['orders'][0]
-            items = []
-            for item in order.get('line_items', []):
-                pr = shopify_api_call(f"products/{item.get('product_id')}.json")
-                tags = [t.strip().lower() for t in pr.get('product', {}).get('tags', '').split(',')] if pr else []
-                items.append({
-                    'title': item.get('title'),
-                    'sku': item.get('sku'),
-                    'current_qty': item.get('current_quantity', item.get('quantity', 1)),
-                    'tags': tags
+            ui_html = MANUAL_TRIGGER_HTML.replace('GOOGLE_SHEET_ID_CLEARTIME', GOOGLE_SHEET_ID_CLEARTIME or '').replace('GOOGLE_SHEET_ID', GOOGLE_SHEET_ID or '')
+            ui_html = ui_html.replace('https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID', lck_url)
+            ui_html = ui_html.replace('https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID_CLEARTIME', ct_url)
+            
+            self.send_html(ui_html)
+            return
+
+        # Order lookup endpoint for UI
+        if parsed.path == '/api/lookup':
+            qs = parse_qs(parsed.query)
+            order_num = (qs.get('order') or [''])[0].strip()
+            if not order_num:
+                self.send_json(400, {'error': 'order parameter required'})
+                return
+            try:
+                result = shopify_api_call(f'orders.json?name=%23{order_num}&status=any')
+                if not result or not result.get('orders'):
+                    self.send_json(404, {'error': f'Order #{order_num} not found in Shopify'})
+                    return
+
+                order = result['orders'][0]
+                items = []
+                for item in order.get('line_items', []):
+                    product_id = item.get('product_id')
+                    tags_list = []
+                    if product_id:
+                        pr = shopify_api_call(f'products/{product_id}.json')
+                        if pr:
+                            tags_str = pr.get('product', {}).get('tags', '')
+                            tags_list = [t.strip().lower() for t in tags_str.split(',') if t.strip()]
+                    
+                    items.append({
+                        'title': item.get('title', ''),
+                        'sku': item.get('sku', ''),
+                        'current_qty': item.get('current_quantity', item.get('quantity', 1)),
+                        'tags': tags_list
+                    })
+
+                self.send_json(200, {
+                    'order_id': order['id'],
+                    'order_number': order.get('name'),
+                    'items': items
                 })
-            self.send_json(200, {'order_id': order['id'], 'items': items})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+            return
+
+        # Health check
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Master webhook handler is active')
 
     def do_POST(self):
+        from urllib.parse import urlparse
+        parsed = urlparse(self.path)
         content_length = int(self.headers.get('Content-Length', 0))
-        payload = json.loads(self.rfile.read(content_length))
-        if self.path == '/api/manual':
-            order_res = shopify_api_call(f"orders/{payload.get('order_id')}.json")
-            
-            # --- FIXED: ADDED force=True HERE ---
-            result = process_order(order_res['order'], add_featured_tag=payload.get('add_featured_tag', False), force=True)
-            self.send_json(200, result)
-        else:
+        body = self.rfile.read(content_length)
+
+        try:
+            payload = json.loads(body.decode('utf-8'))
+        except Exception as e:
+            self.send_json(400, {'error': f'Invalid JSON payload: {e}'})
+            return
+
+        # Manual trigger endpoint from UI
+        if parsed.path == '/api/manual':
+            order_id = payload.get('order_id')
+            if not order_id:
+                self.send_json(400, {'error': 'order_id is required'})
+                return
+            try:
+                order_res = shopify_api_call(f'orders/{order_id}.json')
+                if not order_res or not order_res.get('order'):
+                    self.send_json(404, {'error': 'Order not found in Shopify'})
+                    return
+                
+                # Manual trigger passes force=True to bypass lock intentionally
+                result = process_order(
+                    order_res['order'], 
+                    add_featured_tag=payload.get('add_featured_tag', False), 
+                    force=True
+                )
+                self.send_json(200, result)
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+            return
+
+        # Automatic background Shopify webhook
+        print("=" * 60)
+        print("SHOPIFY WEBHOOK RECEIVED")
+        print("=" * 60)
+        try:
             result = process_order(payload, add_featured_tag=False, force=False)
             self.send_json(200, result)
+        except Exception as e:
+            print(f"ERROR processing webhook: {e}")
+            import traceback
+            traceback.print_exc()
+            self.send_json(500, {'error': str(e)})
