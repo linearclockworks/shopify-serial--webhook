@@ -1,6 +1,5 @@
 # Manual order processing tool - allows you to process Shopify orders that were created manually
 # Visit: https://shopify-serial-webhook.vercel.app/api/process-order
-# IMPORTANT: Only processes products tagged "sample" - skips "featured" products
 
 import json
 import os
@@ -183,13 +182,11 @@ def add_serial_to_order_note(order_id, lck_serials, cleartime_serials):
 
 def get_order(order_number):
     """Fetch order data from Shopify by order number"""
-    # Try to get by order number (name field)
     result = shopify_api_call(f'orders.json?name=%23{order_number}&status=any')
     
     if result and result.get('orders'):
         return result['orders'][0]
     
-    # Try as order ID
     result = shopify_api_call(f'orders/{order_number}.json')
     if result:
         return result.get('order')
@@ -197,7 +194,7 @@ def get_order(order_number):
     return None
 
 def process_order(order_data):
-    """Process an order and assign serials - ONLY for products tagged 'sample'"""
+    """Process an order and assign serials"""
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
     
@@ -222,16 +219,13 @@ def process_order(order_data):
         
         print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
         
-        # Skip removed line items
         if not current_qty or current_qty == 0:
             print(f"⏭️ Skipping removed line item: {product_title}")
             continue
         
-        # Check if cleartime product
         is_cleartime = any(sku.upper().startswith(prefix) for prefix in CLEARTIME_SKU_PREFIXES) if sku else False
         
         if sku and sku.upper().startswith('LCK-'):
-            # Process LCK products - ONLY if tagged "sample"
             product_result = shopify_api_call(f'products/{product_id}.json')
             if product_result:
                 tags = product_result.get('product', {}).get('tags', '')
@@ -256,14 +250,12 @@ def process_order(order_data):
                     log_to_lck_sheet(product_title, serial, order_number, customer_name, order_date)
         
         elif sku and is_cleartime:
-            # Process cleartime products
             for i in range(current_qty):
                 serial = get_next_cleartime_serial()
                 if serial:
                     cleartime_serials.append(serial)
                     log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date)
     
-    # Add serials to order notes
     if lck_serials or cleartime_serials:
         add_serial_to_order_note(order_id, lck_serials, cleartime_serials)
     
@@ -275,153 +267,161 @@ def process_order(order_data):
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        html = '''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Manual Order Processing</title>
-            <style>
-                body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-                h2 { color: #333; }
-                form { background: #f5f5f5; padding: 20px; border-radius: 5px; }
-                label { display: block; margin-bottom: 5px; font-weight: bold; }
-                input { width: 100%; padding: 8px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 3px; box-sizing: border-box; }
-                button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 3px; cursor: pointer; font-size: 16px; }
-                button:hover { background: #45a049; }
-                .note { color: #666; font-size: 14px; margin-top: 10px; }
-                .warning { background: #fff8e1; border: 1px solid #ffe082; border-radius: 5px; padding: 10px; margin: 15px 0; color: #7a5800; font-size: 14px; }
-            </style>
-        </head>
-        <body>
-            <h2>📦 Manual Order Processing</h2>
-            <p>Use this tool to process orders created manually in Shopify Admin.</p>
-            <div class="warning">
-                ⚠️ <strong>Only processes products tagged "sample"</strong>. Products tagged "featured" are skipped.
-            </div>
-            <form method="POST">
-                <label>Order Number:</label>
-                <input type="text" name="order_number" placeholder="2803 or #2803" required autofocus>
-                <button type="submit">Process Order</button>
-                <div class="note">
-                    💡 Enter the order number from Shopify (with or without #)<br>
-                    The tool will assign serial numbers and update Google Sheets automatically.
-                </div>
-            </form>
-        </body>
-        </html>
-        '''
+        lck_sheet_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}" if GOOGLE_SHEET_ID else "#"
+        ct_sheet_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID_CLEARTIME}" if GOOGLE_SHEET_ID_CLEARTIME else "#"
+
+        html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Manual Order Processing</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; color: #222; background: #f9f9fb; }}
+        h2 {{ margin-top: 0; color: #111; }}
+        form {{ background: #fff; padding: 20px; border-radius: 8px; border: 1px solid #e1e4e8; box-shadow: 0 2px 4px rgba(0,0,0,0.04); }}
+        label {{ display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.95rem; }}
+        input {{ width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 1rem; }}
+        button {{ background: #2e7d32; color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 1rem; font-weight: 600; width: 100%; }}
+        button:hover {{ background: #1b5e20; }}
+        .note {{ color: #555; font-size: 0.88rem; margin-top: 15px; line-height: 1.4; }}
+        .warning {{ background: #fff8e1; border: 1px solid #ffe082; border-radius: 6px; padding: 12px 15px; margin: 15px 0; color: #7a5800; font-size: 0.9rem; line-height: 1.4; }}
+        .warning ul {{ margin: 6px 0 0 18px; padding: 0; }}
+        .warning li {{ margin-bottom: 4px; }}
+        a {{ color: #0b61d8; text-decoration: none; font-weight: 500; }}
+        a:hover {{ text-decoration: underline; }}
+    </style>
+</head>
+<body>
+    <h2>📦 Manual Order Processing</h2>
+    <p>Use this tool to process orders created manually in Shopify Admin.</p>
+
+    <div class="warning">
+        ⚠️ <strong>Processing & Filtering Rules:</strong>
+        <ul>
+            <li><strong>Hardwood Clocks (SKU LCK-):</strong> Requires <code>sample</code> tag. Logs to <a href="{lck_sheet_url}" target="_blank">Clocks Spreadsheet ↗</a></li>
+            <li><strong>Cleartime Clocks (SKUs CT, FA, MP, KIT):</strong> Processed automatically regardless of tags. Logs to <a href="{ct_sheet_url}" target="_blank">CTClocks Spreadsheet ↗</a></li>
+        </ul>
+    </div>
+
+    <form method="POST">
+        <label for="order_number">Order Number:</label>
+        <input type="text" id="order_number" name="order_number" placeholder="2803 or #2803" required autofocus>
+        <button type="submit">Process Order</button>
+        <div class="note">
+            💡 Enter the order number from Shopify (with or without #).<br>
+            Serial numbers will be added to the Shopify order notes and updated in Google Sheets automatically.
+        </div>
+    </form>
+</body>
+</html>'''
         self.send_response(200)
-        self.send_header('Content-type', 'text/html')
+        self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write(html.encode())
+        self.wfile.write(html.encode('utf-8'))
     
     def do_POST(self):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length).decode()
+            body = self.rfile.read(content_length).decode('utf-8')
             
-            # Extract order number
             order_number = body.split('order_number=')[1].split('&')[0]
-            order_number = order_number.replace('%23', '').replace('#', '').strip()
+            order_number = urllib.parse.unquote(order_number).replace('#', '').strip()
             
-            # Fetch order from Shopify
             order_data = get_order(order_number)
             
             if not order_data:
-                html = f'''
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Order Not Found</title>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
-                        .error {{ background: #ffebee; padding: 20px; border-radius: 5px; color: #c62828; }}
-                        a {{ color: #1976d2; text-decoration: none; }}
-                    </style>
-                </head>
-                <body>
-                    <div class="error">
-                        <h2>❌ Order Not Found</h2>
-                        <p>Could not find order #{order_number} in Shopify.</p>
-                        <p>Make sure the order number is correct and the order exists.</p>
-                    </div>
-                    <p><a href="/api/process-order">← Try again</a></p>
-                </body>
-                </html>
-                '''
+                html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Order Not Found</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
+        .error {{ background: #ffebee; padding: 20px; border-radius: 8px; color: #c62828; border: 1px solid #ef9a9a; }}
+        a {{ color: #1976d2; text-decoration: none; font-weight: 600; }}
+    </style>
+</head>
+<body>
+    <div class="error">
+        <h2>❌ Order Not Found</h2>
+        <p>Could not find order #{order_number} in Shopify.</p>
+        <p>Make sure the order number is correct and the order exists.</p>
+    </div>
+    <p><a href="/api/process-order">← Try again</a></p>
+</body>
+</html>'''
                 self.send_response(404)
-                self.send_header('Content-type', 'text/html')
+                self.send_header('Content-type', 'text/html; charset=utf-8')
                 self.end_headers()
-                self.wfile.write(html.encode())
+                self.wfile.write(html.encode('utf-8'))
                 return
             
-            # Process the order
             result = process_order(order_data)
             
-            # Build results HTML
             serials_html = ''
+            lck_sheet_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}" if GOOGLE_SHEET_ID else "#"
+            ct_sheet_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID_CLEARTIME}" if GOOGLE_SHEET_ID_CLEARTIME else "#"
+
             if result['lck_serials']:
-                serials_html += f"<p><strong>LCK Serials:</strong> {', '.join(result['lck_serials'])}</p>"
+                serials_html += f'<p><strong>LCK Serials:</strong> {", ".join(result["lck_serials"])} — Logged to <a href="{lck_sheet_url}" target="_blank">Clocks Sheet ↗</a></p>'
             if result['cleartime_serials']:
-                serials_html += f"<p><strong>Cleartime Serials:</strong> {', '.join(result['cleartime_serials'])}</p>"
+                serials_html += f'<p><strong>Cleartime Serials:</strong> {", ".join(result["cleartime_serials"])} — Logged to <a href="{ct_sheet_url}" target="_blank">CTClocks Sheet ↗</a></p>'
             
             if not result['lck_serials'] and not result['cleartime_serials']:
-                serials_html = '<p><em>No serials assigned (no LCK or cleartime products found, or all were tagged "featured")</em></p>'
+                serials_html = '<p><em>No serials assigned (no LCK or Cleartime products found, or LCK products were tagged "featured")</em></p>'
             
-            html = f'''
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Order Processed</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
-                    .success {{ background: #e8f5e9; padding: 20px; border-radius: 5px; color: #2e7d32; }}
-                    a {{ color: #1976d2; text-decoration: none; }}
-                    strong {{ color: #1976d2; }}
-                </style>
-            </head>
-            <body>
-                <div class="success">
-                    <h2>✅ Order Processed Successfully!</h2>
-                    <p><strong>Order:</strong> {result['order']}</p>
-                    {serials_html}
-                    <p><em>Serial numbers have been added to order notes and Google Sheets.</em></p>
-                </div>
-                <p><a href="/api/process-order">← Process another order</a></p>
-            </body>
-            </html>
-            '''
+            html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Order Processed</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
+        .success {{ background: #e8f5e9; padding: 20px; border-radius: 8px; color: #2e7d32; border: 1px solid #a5d6a7; }}
+        a {{ color: #1565c0; text-decoration: underline; }}
+    </style>
+</head>
+<body>
+    <div class="success">
+        <h2>✅ Order Processed Successfully!</h2>
+        <p><strong>Order:</strong> {result['order']}</p>
+        {serials_html}
+        <p><em>Serial numbers have been added to order notes and recorded in Google Sheets.</em></p>
+    </div>
+    <p><a href="/api/process-order">← Process another order</a></p>
+</body>
+</html>'''
             self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(html.encode())
+            self.wfile.write(html.encode('utf-8'))
             
         except Exception as e:
             import traceback
             traceback.print_exc()
             
-            html = f'''
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Error</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
-                    .error {{ background: #ffebee; padding: 20px; border-radius: 5px; color: #c62828; }}
-                    a {{ color: #1976d2; text-decoration: none; }}
-                    code {{ background: #f5f5f5; padding: 2px 5px; border-radius: 3px; }}
-                </style>
-            </head>
-            <body>
-                <div class="error">
-                    <h2>❌ Error Processing Order</h2>
-                    <p><code>{str(e)}</code></p>
-                </div>
-                <p><a href="/api/process-order">← Try again</a></p>
-            </body>
-            </html>
-            '''
+            html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Error</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }}
+        .error {{ background: #ffebee; padding: 20px; border-radius: 8px; color: #c62828; border: 1px solid #ef9a9a; }}
+        a {{ color: #1976d2; text-decoration: none; }}
+        code {{ background: #f5f5f5; padding: 2px 5px; border-radius: 4px; font-family: monospace; }}
+    </style>
+</head>
+<body>
+    <div class="error">
+        <h2>❌ Error Processing Order</h2>
+        <p><code>{str(e)}</code></p>
+    </div>
+    <p><a href="/api/process-order">← Try again</a></p>
+</body>
+</html>'''
             self.send_response(500)
-            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(html.encode())
+            self.wfile.write(html.encode('utf-8'))
