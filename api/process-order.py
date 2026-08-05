@@ -14,7 +14,7 @@ GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
 GOOGLE_SHEET_ID_CLEARTIME = os.environ.get('GOOGLE_SHEET_ID_CLEARTIME', '')
 GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
-CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT']
+CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED']
 
 def get_google_sheet(is_cleartime=False):
     """Connect to the appropriate Google Sheet"""
