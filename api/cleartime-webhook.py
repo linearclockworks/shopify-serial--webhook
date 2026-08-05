@@ -17,7 +17,7 @@ GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID_CLEARTIME', '')
 GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
 # SKU prefixes for cleartime products
-CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT']
+CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED']
 
 def get_google_sheet():
     """Connect to the CTClocks Google Sheet"""
