@@ -124,7 +124,7 @@ def find_master_product(style_name):
     print(f"✗ No match found after scanning {found_products} products")
     return None
 
-ddef publish_to_sales_channels(product_id):
+def publish_to_sales_channels(product_id):
     """Publish product to Shop only (not Online Store) so it's hidden from search but available for orders"""
     try:
         # Get available publications (sales channels)

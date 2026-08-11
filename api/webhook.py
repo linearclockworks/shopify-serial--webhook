@@ -235,8 +235,8 @@ def set_inventory_at_location(inventory_item_id, location_id, quantity):
         print(f"⚠️ Inventory processing failed at location {location_id}: {e}")
         return False
 
-def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None):
-    """Create a new product based on the sample product with exact SKU matching"""
+def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None, variant_title=None):
+    """Create a new product based on the sample product with exact SKU matching and size in title"""
     try:
         result = shopify_api_call(f'products/{sample_product_id}.json')
         if not result:
@@ -246,7 +246,6 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
         sample = result.get('product', {})
         base_title = sample.get('title', '')
         serial_only = serial.replace('LCK-', '')
-        new_title = f"{base_title}-{serial_only}"
 
         original_tags = sample.get('tags', '')
         new_tags = swap_tags(original_tags, add_featured_tag=add_featured_tag)
@@ -255,6 +254,7 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
         variants = sample.get('variants', [])
         
         price = '0.00'
+        matched_variant_title = ''
         if variants:
             price = variants[0].get('price', '0.00')
             if purchased_sku:
@@ -262,8 +262,23 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
                     v_sku = v.get('sku', '')
                     if v_sku and v_sku.strip().lower() == purchased_sku.strip().lower():
                         price = v.get('price', price)
+                        matched_variant_title = v.get('title', '')
                         print(f"✓ Match found! Variant SKU '{v_sku}' price used: ${price}")
                         break
+
+        # Determine size label (3-foot or 5-foot) based on selected variant
+        search_text = f"{variant_title or ''} {matched_variant_title} {purchased_sku or ''}".lower()
+        size_label = ''
+        
+        if any(term in search_text for term in ['3-foot', '3 foot', '3ft', "3'"]) or '3' in (variant_title or ''):
+            size_label = '3-foot'
+        elif any(term in search_text for term in ['5-foot', '5 foot', '5ft', "5'"]) or '5' in (variant_title or ''):
+            size_label = '5-foot'
+
+        if size_label:
+            new_title = f"{base_title} {size_label}-{serial_only}"
+        else:
+            new_title = f"{base_title}-{serial_only}"
 
         new_product = {
             'product': {
@@ -488,13 +503,14 @@ def process_order(order_data, add_featured_tag=False, force=False):
 
         for item in order_data.get('line_items', []):
             product_title = item.get('title', '')
+            variant_title = item.get('variant_title', '')
             sku = item.get('sku', '')
             quantity = item.get('quantity', 1)
             current_qty = item.get('current_quantity', quantity)
             product_id = item.get('product_id')
             line_item_id = item.get('id')
 
-            print(f"Line item: {product_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
+            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
 
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
@@ -525,7 +541,13 @@ def process_order(order_data, add_featured_tag=False, force=False):
                         continue
 
                     lck_serials.append(serial)
-                    new_product = create_product_from_sample(product_id, serial, add_featured_tag=add_featured_tag, purchased_sku=sku)
+                    new_product = create_product_from_sample(
+                        product_id, 
+                        serial, 
+                        add_featured_tag=add_featured_tag, 
+                        purchased_sku=sku,
+                        variant_title=variant_title
+                    )
                     
                     if new_product:
                         products_created.append(new_product['title'])
