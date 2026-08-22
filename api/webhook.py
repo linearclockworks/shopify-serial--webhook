@@ -3,6 +3,7 @@
 # 2. Generates unique serial numbers (LCK-#### for Hardwood, numbers for Cleartime).
 # 3. Clones products, swaps order line items via GraphQL, updates order notes.
 # 4. Logs to Google Sheets AND appends to 'PrintQueue' for automatic DYMO printing.
+# 5. Automatically creates a companion order for Bryan Crider for Hardwood sleds (unless 'stock' discount is used).
 
 import json
 import os
@@ -44,7 +45,6 @@ def get_google_sheet(is_cleartime=False, worksheet_name=None):
 def queue_label_for_printing(sku, serial, is_cleartime=True):
     """Add label job to PrintQueue tab for local DYMO listener"""
     try:
-        # Try to open 'PrintQueue' worksheet; create if missing
         sheet = get_google_sheet(is_cleartime=is_cleartime, worksheet_name='PrintQueue')
         if not sheet:
             return False
@@ -52,7 +52,6 @@ def queue_label_for_printing(sku, serial, is_cleartime=True):
         sn_text = f"S/N {serial}" if not str(serial).startswith('S/N') else str(serial)
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Columns: [SKU, Serial/SN, Status, Timestamp]
         row = [sku, sn_text, 'PENDING', timestamp]
         sheet.insert_row(row, index=2)
         print(f"✓ Queued DYMO label print job: {sku} | {sn_text}")
@@ -266,7 +265,6 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
                         print(f"✓ Match found! Variant SKU '{v_sku}' price used: ${price}")
                         break
 
-        # Determine size label (3-foot or 5-foot) based on selected variant
         search_text = f"{variant_title or ''} {matched_variant_title} {purchased_sku or ''}".lower()
         size_label = ''
         
@@ -328,6 +326,44 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
     except Exception as e:
         print(f"✗ Error creating product: {e}")
         return None
+
+def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
+    """Create a reminder order assigned to Bryan Crider for custom sled items"""
+    try:
+        line_items = [
+            {
+                'title': f"Sled for {item_title}",
+                'quantity': 1,
+                'price': '0.00',
+                'requires_shipping': True
+            } for item_title in sled_item_titles
+        ]
+        
+        new_order = {
+            'order': {
+                'customer': {
+                    'first_name': 'Bryan',
+                    'last_name': 'Crider'
+                },
+                'shipping_address': {
+                    'first_name': 'Bryan',
+                    'last_name': 'Crider'
+                },
+                'line_items': line_items,
+                'note': f"Sled for Order {orig_order_number}"
+            }
+        }
+        
+        result = shopify_api_call('orders.json', method='POST', data=new_order)
+        if result and result.get('order'):
+            print(f"✓ Successfully created Bryan Crider sled order: {result['order'].get('name')}")
+            return True
+        else:
+            print(f"⚠️ Failed to create Bryan Crider sled order: {result}")
+            return False
+    except Exception as e:
+        print(f"✗ Error creating Bryan Crider sled order: {e}")
+        return False
 
 def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
     """Executes GraphQL sequence to swap out the sample for the serialized product on an order"""
@@ -495,11 +531,16 @@ def process_order(order_data, add_featured_tag=False, force=False):
         except:
             order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        print(f"Processing order {order_number} (ID: {order_id}) force={force}")
+        # Check for 'stock' discount code
+        discount_codes = [d.get('code', '').strip().lower() for d in order_data.get('discount_codes', []) if d.get('code')]
+        has_stock_discount = 'stock' in discount_codes
+
+        print(f"Processing order {order_number} (ID: {order_id}) force={force} has_stock_discount={has_stock_discount}")
 
         products_created = []
         lck_serials = []
         cleartime_serials = []
+        bryan_sled_items = []
 
         for item in order_data.get('line_items', []):
             product_title = item.get('title', '')
@@ -551,6 +592,11 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     
                     if new_product:
                         products_created.append(new_product['title'])
+                        
+                        # Queue item title for Bryan Crider sled order if 'stock' discount is NOT used
+                        if not has_stock_discount:
+                            bryan_sled_items.append(new_product['title'])
+
                         log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
                         queue_label_for_printing(sku=sku, serial=serial, is_cleartime=False)
                         
@@ -570,6 +616,10 @@ def process_order(order_data, add_featured_tag=False, force=False):
         if lck_serials or cleartime_serials:
             add_serial_to_order_note(order_id, lck_serials, cleartime_serials)
 
+        # Create companion sled order for Bryan Crider if applicable
+        if bryan_sled_items:
+            create_sled_order_for_bryan(order_number, bryan_sled_items)
+
         if not force:
             mark_order_as_completed(order_id)
 
@@ -578,7 +628,8 @@ def process_order(order_data, add_featured_tag=False, force=False):
             'order': order_number,
             'products': products_created,
             'lck_serials': lck_serials,
-            'cleartime_serials': cleartime_serials
+            'cleartime_serials': cleartime_serials,
+            'bryan_sled_order_created': bool(bryan_sled_items)
         }
     except Exception as e:
         print(f"ERROR during processing: {e}")
