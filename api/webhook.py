@@ -3,7 +3,7 @@
 # 2. Generates unique serial numbers (LCK-#### for Hardwood, numbers for Cleartime).
 # 3. Clones products, swaps order line items via GraphQL, updates order notes.
 # 4. Logs to Google Sheets AND appends to 'PrintQueue' for automatic DYMO printing.
-# 5. Automatically creates a companion order for Bryan Crider for Hardwood sleds (unless 'stock' discount is used).
+# 5. Automatically creates a companion order for Bryan Crider using the 'Sled replacement' product (100% discounted).
 
 import json
 import os
@@ -327,18 +327,60 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
         print(f"✗ Error creating product: {e}")
         return None
 
-def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
-    """Create a reminder order assigned to Bryan Crider for custom sled items"""
+def get_sled_replacement_variant():
+    """Look up the 'Sled replacement' product variant ID and price from Shopify"""
     try:
-        line_items = [
-            {
-                'title': f"Sled for {item_title}",
-                'quantity': 1,
-                'price': '0.00',
-                'requires_shipping': True
-            } for item_title in sled_item_titles
-        ]
+        result = shopify_api_call('products.json?title=Sled%20replacement')
+        if result and result.get('products'):
+            product = result['products'][0]
+            variants = product.get('variants', [])
+            if variants:
+                return variants[0].get('id'), variants[0].get('price', '0.00')
         
+        # Fallback search across all products if exact title query varies
+        all_products = shopify_api_call('products.json')
+        if all_products and all_products.get('products'):
+            for p in all_products['products']:
+                if 'sled replacement' in p.get('title', '').lower():
+                    variants = p.get('variants', [])
+                    if variants:
+                        return variants[0].get('id'), variants[0].get('price', '0.00')
+        print("⚠️ Could not locate 'Sled replacement' product variant in catalog.")
+        return None, '0.00'
+    except Exception as e:
+        print(f"⚠️ Error fetching sled replacement variant: {e}")
+        return None, '0.00'
+
+def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
+    """Create an order assigned to Bryan Crider for 'Sled replacement' products with 100% discount"""
+    try:
+        sled_variant_id, sled_price = get_sled_replacement_variant()
+
+        line_items = []
+        for item_title in sled_item_titles:
+            if sled_variant_id:
+                line_items.append({
+                    'variant_id': int(sled_variant_id),
+                    'quantity': 1,
+                    'applied_discount': {
+                        'name': '100% Sled Discount',
+                        'value': '100.0',
+                        'value_type': 'percentage',
+                        'amount': str(sled_price)
+                    },
+                    'properties': [
+                        {'name': 'For Clock', 'value': item_title}
+                    ]
+                })
+            else:
+                # Fallback to custom item if product cannot be retrieved
+                line_items.append({
+                    'title': f"Sled replacement - {item_title}",
+                    'quantity': 1,
+                    'price': '0.00',
+                    'requires_shipping': True
+                })
+
         new_order = {
             'order': {
                 'customer': {
@@ -350,13 +392,14 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
                     'last_name': 'Crider'
                 },
                 'line_items': line_items,
-                'note': f"Sled for Order {orig_order_number}"
+                'note': f"Sled replacement for Order {orig_order_number}",
+                'tags': 'Sled, Bryan Crider, Automated'
             }
         }
         
         result = shopify_api_call('orders.json', method='POST', data=new_order)
         if result and result.get('order'):
-            print(f"✓ Successfully created Bryan Crider sled order: {result['order'].get('name')}")
+            print(f"✓ Successfully created Bryan Crider sled replacement order: {result['order'].get('name')}")
             return True
         else:
             print(f"⚠️ Failed to create Bryan Crider sled order: {result}")
@@ -593,7 +636,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     if new_product:
                         products_created.append(new_product['title'])
                         
-                        # Queue item title for Bryan Crider sled order if 'stock' discount is NOT used
+                        # Queue item title for Bryan Crider sled replacement order if 'stock' discount is NOT used
                         if not has_stock_discount:
                             bryan_sled_items.append(new_product['title'])
 
@@ -616,7 +659,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
         if lck_serials or cleartime_serials:
             add_serial_to_order_note(order_id, lck_serials, cleartime_serials)
 
-        # Create companion sled order for Bryan Crider if applicable
+        # Create companion sled replacement order for Bryan Crider if applicable
         if bryan_sled_items:
             create_sled_order_for_bryan(order_number, bryan_sled_items)
 
