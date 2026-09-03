@@ -1,5 +1,5 @@
 # Summary: Unified Webhook & Manual Processing Hub with DYMO Print Queue Support
-# 1. Handles both Hardwood (LCK-) and Cleartime (CT, FA, MP, KIT, LED) orders.
+# 1. Handles both Hardwood (LCK-) and Cleartime (CT, FA, MP, KIT, LED, HZ) orders.
 # 2. Generates unique serial numbers (LCK-#### for Hardwood, numbers for Cleartime).
 # 3. Clones products, swaps order line items via GraphQL, updates order notes.
 # 4. Logs to Google Sheets AND appends to 'PrintQueue' for automatic DYMO printing.
@@ -18,7 +18,7 @@ GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
 GOOGLE_SHEET_ID_CLEARTIME = os.environ.get('GOOGLE_SHEET_ID_CLEARTIME', '')
 GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
-CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED']
+CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED', 'HZ']
 
 def get_google_sheet(is_cleartime=False, worksheet_name=None):
     """Connect to a specific Google Sheet worksheet"""
@@ -337,7 +337,6 @@ def get_sled_replacement_variant():
             if variants:
                 return variants[0].get('id'), variants[0].get('price', '0.00')
         
-        # Fallback search across all products if exact title query varies
         all_products = shopify_api_call('products.json')
         if all_products and all_products.get('products'):
             for p in all_products['products']:
@@ -373,7 +372,6 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
                     ]
                 })
             else:
-                # Fallback to custom item if product cannot be retrieved
                 line_items.append({
                     'title': f"Sled replacement - {item_title}",
                     'quantity': 1,
@@ -574,7 +572,6 @@ def process_order(order_data, add_featured_tag=False, force=False):
         except:
             order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # Check for 'stock' discount code
         discount_codes = [d.get('code', '').strip().lower() for d in order_data.get('discount_codes', []) if d.get('code')]
         has_stock_discount = 'stock' in discount_codes
 
@@ -636,7 +633,6 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     if new_product:
                         products_created.append(new_product['title'])
                         
-                        # Queue item title for Bryan Crider sled replacement order if 'stock' discount is NOT used
                         if not has_stock_discount:
                             bryan_sled_items.append(new_product['title'])
 
@@ -647,7 +643,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
                         swap_status = "Swapped successfully" if swap_success else "Note fallback only"
                         print(f"Order swap status for {serial}: {swap_status} ({swap_msg if not swap_success else ''})")
 
-            # Cleartime Clocks (SKU starts with CT, FA, MP, KIT, LED)
+            # Cleartime Clocks (SKU starts with CT, FA, MP, KIT, LED, HZ)
             elif sku and is_cleartime:
                 for i in range(current_qty):
                     serial = get_next_serial(key='cleartime_serial_counter', prefix='')
@@ -659,7 +655,6 @@ def process_order(order_data, add_featured_tag=False, force=False):
         if lck_serials or cleartime_serials:
             add_serial_to_order_note(order_id, lck_serials, cleartime_serials)
 
-        # Create companion sled replacement order for Bryan Crider if applicable
         if bryan_sled_items:
             create_sled_order_for_bryan(order_number, bryan_sled_items)
 
@@ -711,7 +706,7 @@ MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
 <body>
 <h1>⚡ Master Webhook Trigger</h1>
 <div class="info-box">
-  Processes both <strong>Hardwood (LCK-)</strong> and <strong>Cleartime (CT, FA, MP, KIT, LED)</strong> clocks.<br>
+  Processes both <strong>Hardwood (LCK-)</strong> and <strong>Cleartime (CT, FA, MP, KIT, LED, HZ)</strong> clocks.<br>
   • <strong>Hardwood:</strong> Clones sample product, swaps line item, logs to <a href="https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID" target="_blank">Clocks Spreadsheet ↗</a><br>
   • <strong>Cleartime:</strong> Generates serial number, updates notes, logs to <a href="https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID_CLEARTIME" target="_blank">CTClocks Spreadsheet ↗</a>
 </div>
