@@ -1,7 +1,7 @@
 # Summary: Unified Webhook & Manual Processing Hub with DYMO Print Queue Support
 # 1. Handles both Hardwood (LCK-) and Cleartime (CT, FA, MP, KIT, LED, HZ) orders.
 # 2. Generates unique serial numbers (LCK-#### for Hardwood, numbers for Cleartime).
-# 3. Clones products, swaps order line items via GraphQL, updates order notes.
+# 3. Clones products, swaps order line items via GraphQL, re-applies discounts, updates order notes.
 # 4. Logs to Google Sheets AND appends to 'PrintQueue' for automatic DYMO printing.
 # 5. Automatically creates a companion order for Bryan Crider using the 'Sled replacement' product (100% discounted).
 
@@ -406,8 +406,8 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
         print(f"✗ Error creating Bryan Crider sled order: {e}")
         return False
 
-def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
-    """Executes GraphQL sequence to swap out the sample for the serialized product on an order"""
+def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_amount=0.0, discount_description="Discount", currency_code="USD"):
+    """Executes GraphQL sequence to swap out the sample for the serialized product on an order and re-apply discounts"""
     print(f"Starting line item swap sequence for Order ID: {order_id}")
     
     begin_mutation = """
@@ -465,7 +465,16 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
     add_mutation = """
     mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
       orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
-        calculatedOrder { id }
+        calculatedOrder { 
+          id 
+          addedLineItems(first: 5) {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
         userErrors { field message }
       }
     }
@@ -479,6 +488,35 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id):
         return False, f"orderEditAddVariant failure: {res}"
         
     print(f"✓ Successfully staged addition of serialized unique variant")
+
+    # Re-apply line-item discount if the original item had a discount
+    if discount_amount > 0:
+        added_edges = res['data']['orderEditAddVariant']['calculatedOrder'].get('addedLineItems', {}).get('edges', [])
+        if added_edges:
+            new_line_item_gid = added_edges[-1]['node']['id']
+            discount_mutation = """
+            mutation orderEditAddLineItemDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
+              orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
+                calculatedOrder { id }
+                userErrors { field message }
+              }
+            }
+            """
+            disc_res = shopify_graphql_call(discount_mutation, {
+                "id": calc_order_id,
+                "lineItemId": new_line_item_gid,
+                "discount": {
+                    "description": discount_description,
+                    "fixedValue": {
+                        "amount": f"{discount_amount:.2f}",
+                        "currencyCode": currency_code
+                    }
+                }
+            })
+            if disc_res and not disc_res.get('data', {}).get('orderEditAddLineItemDiscount', {}).get('userErrors'):
+                print(f"✓ Re-applied original line item discount of ${discount_amount:.2f}")
+            else:
+                print(f"⚠️ Failed to re-apply line item discount: {disc_res}")
 
     commit_mutation = """
     mutation orderEditCommit($id: ID!) {
@@ -567,6 +605,8 @@ def process_order(order_data, add_featured_tag=False, force=False):
         customer = order_data.get('customer', {})
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
         created_at = order_data.get('created_at', '')
+        currency_code = order_data.get('currency', 'USD')
+
         try:
             order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
         except:
@@ -574,6 +614,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
 
         discount_codes = [d.get('code', '').strip().lower() for d in order_data.get('discount_codes', []) if d.get('code')]
         has_stock_discount = 'stock' in discount_codes
+        disc_desc = order_data.get('discount_codes', [{}])[0].get('code', 'Discount') if order_data.get('discount_codes') else 'Discount'
 
         print(f"Processing order {order_number} (ID: {order_id}) force={force} has_stock_discount={has_stock_discount}")
 
@@ -590,8 +631,12 @@ def process_order(order_data, add_featured_tag=False, force=False):
             current_qty = item.get('current_quantity', quantity)
             product_id = item.get('product_id')
             line_item_id = item.get('id')
+            
+            # Calculate item discount amount
+            total_discount = float(item.get('total_discount', 0.0) or 0.0)
+            unit_discount = total_discount / quantity if quantity > 0 else 0.0
 
-            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty})")
+            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Discount: ${unit_discount:.2f})")
 
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
@@ -639,7 +684,14 @@ def process_order(order_data, add_featured_tag=False, force=False):
                         log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
                         queue_label_for_printing(sku=sku, serial=serial, is_cleartime=False)
                         
-                        swap_success, swap_msg = execute_line_item_swap(order_id, line_item_id, new_product['variant_id'])
+                        swap_success, swap_msg = execute_line_item_swap(
+                            order_id, 
+                            line_item_id, 
+                            new_product['variant_id'],
+                            discount_amount=unit_discount,
+                            discount_description=disc_desc,
+                            currency_code=currency_code
+                        )
                         swap_status = "Swapped successfully" if swap_success else "Note fallback only"
                         print(f"Order swap status for {serial}: {swap_status} ({swap_msg if not swap_success else ''})")
 
