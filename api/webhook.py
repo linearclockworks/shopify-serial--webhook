@@ -3,7 +3,7 @@
 # 2. Generates unique serial numbers (LCK-#### for Hardwood, numbers for Cleartime).
 # 3. Clones products, swaps order line items via GraphQL, re-applies discounts, updates order notes.
 # 4. Logs to Google Sheets AND appends to 'PrintQueue' for automatic DYMO printing.
-# 5. Automatically creates a companion order for Bryan Crider using the 'Sled replacement' product (100% discounted).
+# 5. Automatically creates a 100% discounted $0.00 companion order for Bryan Crider for Hardwood sleds.
 
 import json
 import os
@@ -351,33 +351,23 @@ def get_sled_replacement_variant():
         return None, '0.00'
 
 def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
-    """Create an order assigned to Bryan Crider for 'Sled replacement' products with 100% discount"""
+    """Create a $0.00 order assigned to Bryan Crider for 'Sled replacement' products at no charge"""
     try:
-        sled_variant_id, sled_price = get_sled_replacement_variant()
+        sled_variant_id, _ = get_sled_replacement_variant()
 
         line_items = []
         for item_title in sled_item_titles:
+            item_payload = {
+                'quantity': 1,
+                'price': '0.00',  # Explicit price override to $0.00
+                'title': f"Sled for {item_title}"  # Title includes clock details cleanly (no properties/code icon)
+            }
             if sled_variant_id:
-                line_items.append({
-                    'variant_id': int(sled_variant_id),
-                    'quantity': 1,
-                    'applied_discount': {
-                        'name': '100% Sled Discount',
-                        'value': '100.0',
-                        'value_type': 'percentage',
-                        'amount': str(sled_price)
-                    },
-                    'properties': [
-                        {'name': 'For Clock', 'value': item_title}
-                    ]
-                })
+                item_payload['variant_id'] = int(sled_variant_id)
             else:
-                line_items.append({
-                    'title': f"Sled replacement - {item_title}",
-                    'quantity': 1,
-                    'price': '0.00',
-                    'requires_shipping': True
-                })
+                item_payload['requires_shipping'] = True
+            
+            line_items.append(item_payload)
 
         new_order = {
             'order': {
@@ -390,14 +380,20 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
                     'last_name': 'Crider'
                 },
                 'line_items': line_items,
-                'note': f"Sled replacement for Order {orig_order_number}",
+                'financial_status': 'paid',  # Fully settled at $0.00
+                'applied_discount': {        # 100% order discount
+                    'title': '100% Sled Discount',
+                    'value': '100.0',
+                    'value_type': 'percentage'
+                },
+                'note': f"Sled for Order #{orig_order_number.replace('#', '')}",
                 'tags': 'Sled, Bryan Crider, Automated'
             }
         }
         
         result = shopify_api_call('orders.json', method='POST', data=new_order)
         if result and result.get('order'):
-            print(f"✓ Successfully created Bryan Crider sled replacement order: {result['order'].get('name')}")
+            print(f"✓ Successfully created $0.00 Bryan Crider sled order: {result['order'].get('name')}")
             return True
         else:
             print(f"⚠️ Failed to create Bryan Crider sled order: {result}")
@@ -489,7 +485,6 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
         
     print(f"✓ Successfully staged addition of serialized unique variant")
 
-    # Re-apply line-item discount if the original item had a discount
     if discount_amount > 0:
         added_edges = res['data']['orderEditAddVariant']['calculatedOrder'].get('addedLineItems', {}).get('edges', [])
         if added_edges:
@@ -632,7 +627,6 @@ def process_order(order_data, add_featured_tag=False, force=False):
             product_id = item.get('product_id')
             line_item_id = item.get('id')
             
-            # Calculate item discount amount
             total_discount = float(item.get('total_discount', 0.0) or 0.0)
             unit_discount = total_discount / quantity if quantity > 0 else 0.0
 
