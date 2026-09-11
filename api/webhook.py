@@ -603,6 +603,13 @@ def process_order(order_data, add_featured_tag=False, force=False):
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
 
+    # 🛑 IMMEDIATELY SKIP COMPANION SLED ORDERS TO PREVENT WEBHOOK LOOPS
+    raw_tags = order_data.get('tags', '') or ''
+    order_tags = [t.strip().lower() for t in raw_tags.split(',') if t.strip()]
+    if 'sled' in order_tags or 'bryan crider' in order_tags:
+        print(f"⏭️ Skipping automated companion sled order: {order_number}")
+        return {'status': 'skipped', 'reason': 'sled_companion_order', 'order': order_number}
+
     if not force and not try_acquire_processing_lock(order_id):
         return {'status': 'already_processing', 'order': order_number}
 
@@ -617,11 +624,9 @@ def process_order(order_data, add_featured_tag=False, force=False):
         except:
             order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        discount_codes = [d.get('code', '').strip().lower() for d in order_data.get('discount_codes', []) if d.get('code')]
-        has_stock_discount = 'stock' in discount_codes
         disc_desc = order_data.get('discount_codes', [{}])[0].get('code', 'Discount') if order_data.get('discount_codes') else 'Discount'
 
-        print(f"Processing order {order_number} (ID: {order_id}) force={force} has_stock_discount={has_stock_discount}")
+        print(f"Processing order {order_number} (ID: {order_id}) force={force}")
 
         products_created = []
         lck_serials = []
@@ -639,7 +644,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
             
             unit_discount = calculate_line_item_discount(item)
 
-            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Discount: ${unit_discount:.2f})")
+            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Unit Discount: ${unit_discount:.2f})")
 
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
@@ -680,7 +685,6 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     
                     if new_product:
                         products_created.append(new_product['title'])
-                        
                         bryan_sled_items.append(new_product['title'])
 
                         log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
