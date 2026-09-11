@@ -1,6 +1,13 @@
-
 {
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/webhook.py" }
+  "functions": {
+    "api/webhook.py": {
+      "runtime": "python@3.9"
+    }
+  },
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/webhook.py"
+    }
   ]
 }
