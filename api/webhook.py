@@ -727,11 +727,10 @@ def process_order(order_data, add_featured_tag=False, force=False):
             'cleartime_serials': cleartime_serials,
             'bryan_sled_order_created': bool(bryan_sled_items)
         }
-   except Exception as e:
-            print(f"ERROR processing webhook: {e}")
-            import traceback
-            traceback.print_exc()
-            self.send_json(500, {'error': str(e)})
+    except Exception as e:
+        print(f"ERROR during processing: {e}")
+        raise
 
-# Expose 'app' entrypoint required by Vercel Serverless Python runtime
-app = handler
+# ── Manual trigger UI ────────────────────────────────────────────────────────
+
+MANUAL_TRIGGER_HTML = """
