@@ -689,7 +689,9 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     if new_product:
                         products_created.append(new_product['title'])
                         
-                        if not has_stock_discount:
+                        if new_product:
+                            products_created.append(new_product['title'])
+                            # Always append to create sled order regardless of discount code
                             bryan_sled_items.append(new_product['title'])
 
                         log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
