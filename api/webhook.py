@@ -689,10 +689,8 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     if new_product:
                         products_created.append(new_product['title'])
                         
-                        if new_product:
-                            products_created.append(new_product['title'])
-                            # Always append to create sled order regardless of discount code
-                            bryan_sled_items.append(new_product['title'])
+                        # Always append to create Bryan Crider sled order
+                        bryan_sled_items.append(new_product['title'])
 
                         log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
                         queue_label_for_printing(sku=sku, serial=serial, is_cleartime=False)
