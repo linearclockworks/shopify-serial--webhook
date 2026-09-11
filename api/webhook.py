@@ -20,6 +20,23 @@ GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
 CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED', 'HZ']
 
+def calculate_line_item_discount(item: dict) -> float:
+    """
+    Calculates total dollar discount allocated to a single unit of a line item,
+    accounting for both line-item discounts and order-level discount codes (e.g. STOCK).
+    """
+    quantity = int(item.get('quantity', 1)) or 1
+    
+    # 1. Check order/item level discount allocations
+    discount_allocations = item.get('discount_allocations', [])
+    if discount_allocations:
+        total_allocated = sum(float(alloc.get('amount', 0.0)) for alloc in discount_allocations)
+        return round(total_allocated / quantity, 2)
+        
+    # 2. Fall back to total_discount property if present
+    total_discount = float(item.get('total_discount', 0.0) or 0.0)
+    return round(total_discount / quantity, 2)
+
 def get_google_sheet(is_cleartime=False, worksheet_name=None):
     """Connect to a specific Google Sheet worksheet"""
     try:
@@ -360,7 +377,7 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
             item_payload = {
                 'quantity': 1,
                 'price': '0.00',  # Explicit price override to $0.00
-                'title': f"Sled for {item_title}"  # Title includes clock details cleanly (no properties/code icon)
+                'title': f"Sled for {item_title}"  # Title includes clock details cleanly
             }
             if sled_variant_id:
                 item_payload['variant_id'] = int(sled_variant_id)
@@ -431,8 +448,8 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
     ]
     
     remove_mutation = """
-    mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
-      orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+    mutation orderEditSetQuantity(\(id: ID!,\)lineItemId: ID!, $quantity: Int!) {
+      orderEditSetQuantity(id: \(id, lineItemId:\)lineItemId, quantity: $quantity) {
         calculatedOrder { id }
         userErrors { field message }
       }
@@ -459,8 +476,8 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
         return False, f"Line item removal failed. Details: {last_error_msg}"
 
     add_mutation = """
-    mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
-      orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
+    mutation orderEditAddVariant(\(id: ID!,\)variantId: ID!, $quantity: Int!) {
+      orderEditAddVariant(id: \(id, variantId:\)variantId, quantity: $quantity) {
         calculatedOrder { 
           id 
           addedLineItems(first: 5) {
@@ -490,8 +507,8 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
         if added_edges:
             new_line_item_gid = added_edges[-1]['node']['id']
             discount_mutation = """
-            mutation orderEditAddLineItemDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
-              orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
+            mutation orderEditAddLineItemDiscount(\(id: ID!,\)lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
+              orderEditAddLineItemDiscount(id: \(id, lineItemId:\)lineItemId, discount: $discount) {
                 calculatedOrder { id }
                 userErrors { field message }
               }
@@ -627,10 +644,10 @@ def process_order(order_data, add_featured_tag=False, force=False):
             product_id = item.get('product_id')
             line_item_id = item.get('id')
             
-            total_discount = float(item.get('total_discount', 0.0) or 0.0)
-            unit_discount = total_discount / quantity if quantity > 0 else 0.0
+            # Dynamically calculate discounts taking discount allocations into account
+            unit_discount = calculate_line_item_discount(item)
 
-            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Discount: ${unit_discount:.2f})")
+            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Unit Discount: ${unit_discount:.2f})")
 
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
@@ -721,293 +738,4 @@ def process_order(order_data, add_featured_tag=False, force=False):
 
 # ── Manual trigger UI ────────────────────────────────────────────────────────
 
-MANUAL_TRIGGER_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Master Webhook Trigger</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  body { margin: 0; padding: 24px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f6f8fa; color: #111; }
-  h1 { margin: 0 0 6px; font-size: 1.4rem; }
-  .card { background: #fff; border: 1px solid #e1e4e8; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-  label { font-weight: 600; font-size: .9rem; display: block; margin-bottom: 6px; }
-  input[type=text] { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 1rem; }
-  button { margin-top: 12px; padding: 10px 20px; background: #0b61d8; color: #fff; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; font-weight: 600; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-  th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: .9rem; }
-  th { background: #f7f9fc; font-weight: 600; }
-  .removed-row td { text-decoration: line-through; color: #999; }
-  .removed-label { color: #d93025; font-weight: bold; text-decoration: none !important; }
-  .tag { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: .75rem; background: #e8f0fe; color: #1a56db; margin-right: 4px; }
-  .tag.sample { background: #fce8e6; color: #c0392b; }
-  .tag.featured { background: #e6f4ea; color: #1e7e34; }
-  .log { background: #1e1e1e; color: #d4d4d4; border-radius: 8px; padding: 14px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; display: none; margin-top: 16px; }
-  .info-box { background: #eef3fc; border: 1px solid #c7d8f8; border-radius: 8px; padding: 12px 15px; margin-bottom: 20px; font-size: 0.9rem; color: #1a3e75; line-height: 1.5; }
-  a { color: #0b61d8; text-decoration: none; font-weight: 500; }
-  a:hover { text-decoration: underline; }
-</style>
-</head>
-<body>
-<h1>⚡ Master Webhook Trigger</h1>
-<div class="info-box">
-  Processes both <strong>Hardwood (LCK-)</strong> and <strong>Cleartime (CT, FA, MP, KIT, LED, HZ)</strong> clocks.<br>
-  • <strong>Hardwood:</strong> Clones sample product, swaps line item, logs to <a href="https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID" target="_blank">Clocks Spreadsheet ↗</a><br>
-  • <strong>Cleartime:</strong> Generates serial number, updates notes, logs to <a href="https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID_CLEARTIME" target="_blank">CTClocks Spreadsheet ↗</a>
-</div>
-
-<div class="card">
-  <label for="orderInput">Order Number</label>
-  <input type="text" id="orderInput" placeholder="2882 or #2882">
-  
-  <div style="margin-top:16px;">
-    <label style="font-weight:600; font-size:.9rem;">Build Type (for Hardwood LCK- clocks only)</label>
-    <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
-      <label style="display:flex; align-items:center; gap:6px; font-weight:400; cursor:pointer;">
-        <input type="radio" name="buildType" value="stock">
-        <span><strong>Stock build</strong> — tagged "featured", visible on site</span>
-      </label>
-      <label style="display:flex; align-items:center; gap:6px; font-weight:400; cursor:pointer;">
-        <input type="radio" name="buildType" value="customer" checked>
-        <span><strong>Customer order</strong> — no "featured" tag, hidden from site</span>
-      </label>
-    </div>
-  </div>
-
-  <button id="lookupBtn">Look Up Order</button>
-
-  <div id="orderInfo" style="display:none">
-    <table>
-      <thead>
-        <tr>
-          <th>Product</th>
-          <th>SKU</th>
-          <th>Tags</th>
-          <th>Qty</th>
-        </tr>
-      </thead>
-      <tbody id="itemsBody"></tbody>
-    </table>
-    <button style="background:#c0392b" id="fireBtn">🔥 Force Process This Order</button>
-    <div class="log" id="logBox"></div>
-  </div>
-</div>
-
-<script>
-let currentOrderId = null;
-
-async function lookup() {
-  const raw = document.getElementById('orderInput').value.trim().replace('#','');
-  if (!raw) return;
-  const btn = document.getElementById('lookupBtn');
-  btn.disabled = true;
-  btn.textContent = 'Searching...';
-  document.getElementById('orderInfo').style.display = 'none';
-  
-  try {
-    const resp = await fetch('/api/lookup?order=' + encodeURIComponent(raw));
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || resp.statusText);
-
-    currentOrderId = data.order_id;
-    const tbody = document.getElementById('itemsBody');
-    tbody.innerHTML = '';
-    
-    let validItems = 0;
-    data.items.forEach(item => {
-      const isRemoved = item.current_qty === 0;
-      if (!isRemoved) validItems++;
-      
-      const tr = document.createElement('tr');
-      if (isRemoved) tr.className = 'removed-row';
-      
-      const tagsHtml = item.tags.map(t => {
-        const cls = t === 'sample' ? 'tag sample' : t === 'featured' ? 'tag featured' : 'tag';
-        return `<span class="${cls}">${t}</span>`;
-      }).join('');
-
-      tr.innerHTML = `
-        <td>${item.title}</td>
-        <td>${item.sku || '—'}</td>
-        <td>${tagsHtml || '—'}</td>
-        <td>${isRemoved ? '<span class="removed-label">REMOVED (0)</span>' : item.current_qty}</td>
-      `;
-      tbody.appendChild(tr);
-    });
-
-    document.getElementById('fireBtn').disabled = validItems === 0;
-    document.getElementById('orderInfo').style.display = 'block';
-    document.getElementById('logBox').style.display = 'none';
-  } catch(e) { 
-    alert('Lookup Error: ' + e.message); 
-  } finally { 
-    btn.disabled = false; 
-    btn.textContent = 'Look Up Order'; 
-  }
-}
-
-async function fire() {
-  if (!currentOrderId) return;
-  if (!confirm('Force-process this order? Serial numbers will be assigned and Google Sheets updated.')) return;
-
-  const btn = document.getElementById('fireBtn');
-  const log = document.getElementById('logBox');
-  btn.disabled = true;
-  btn.textContent = 'Processing...';
-  log.style.display = 'block';
-  log.textContent = 'Sending request...';
-
-  try {
-    const buildType = document.querySelector('input[name=buildType]:checked').value;
-    const resp = await fetch('/api/manual', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        order_id: currentOrderId,
-        add_featured_tag: buildType === 'stock'
-      })
-    });
-    const res = await resp.json();
-    if (!resp.ok) throw new Error(res.error || resp.statusText);
-
-    log.textContent = JSON.stringify(res, null, 2);
-    btn.textContent = '✓ Complete';
-  } catch(e) { 
-    log.textContent = 'Error: ' + e.message; 
-    btn.disabled = false; 
-    btn.textContent = '🔥 Force Process This Order';
-  }
-}
-
-document.getElementById('lookupBtn').addEventListener('click', lookup);
-document.getElementById('orderInput').addEventListener('keydown', e => { if (e.key === 'Enter') lookup(); });
-document.getElementById('fireBtn').addEventListener('click', fire);
-</script>
-</body>
-</html>
-"""
-
-# ── Serverless Route Handler ──────────────────────────────────────────────────
-
-class handler(BaseHTTPRequestHandler):
-    
-    def send_json(self, code, data):
-        body = json.dumps(data).encode('utf-8')
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', len(body))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def send_html(self, html):
-        body = html.encode('utf-8')
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', len(body))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        from urllib.parse import urlparse, parse_qs
-        parsed = urlparse(self.path)
-
-        if parsed.path in ('/', '/api', '/api/'):
-            lck_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}" if GOOGLE_SHEET_ID else "#"
-            ct_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID_CLEARTIME}" if GOOGLE_SHEET_ID_CLEARTIME else "#"
-            
-            ui_html = MANUAL_TRIGGER_HTML.replace('GOOGLE_SHEET_ID_CLEARTIME', GOOGLE_SHEET_ID_CLEARTIME or '').replace('GOOGLE_SHEET_ID', GOOGLE_SHEET_ID or '')
-            ui_html = ui_html.replace('https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID', lck_url)
-            ui_html = ui_html.replace('https://docs.google.com/spreadsheets/d/GOOGLE_SHEET_ID_CLEARTIME', ct_url)
-            
-            self.send_html(ui_html)
-            return
-
-        if parsed.path == '/api/lookup':
-            qs = parse_qs(parsed.query)
-            order_num = (qs.get('order') or [''])[0].strip()
-            if not order_num:
-                self.send_json(400, {'error': 'order parameter required'})
-                return
-            try:
-                result = shopify_api_call(f'orders.json?name=%23{order_num}&status=any')
-                if not result or not result.get('orders'):
-                    self.send_json(404, {'error': f'Order #{order_num} not found in Shopify'})
-                    return
-
-                order = result['orders'][0]
-                items = []
-                for item in order.get('line_items', []):
-                    product_id = item.get('product_id')
-                    tags_list = []
-                    if product_id:
-                        pr = shopify_api_call(f'products/{product_id}.json')
-                        if pr:
-                            tags_str = pr.get('product', {}).get('tags', '')
-                            tags_list = [t.strip().lower() for t in tags_str.split(',') if t.strip()]
-                    
-                    items.append({
-                        'title': item.get('title', ''),
-                        'sku': item.get('sku', ''),
-                        'current_qty': item.get('current_quantity', item.get('quantity', 1)),
-                        'tags': tags_list
-                    })
-
-                self.send_json(200, {
-                    'order_id': order['id'],
-                    'order_number': order.get('name'),
-                    'items': items
-                })
-            except Exception as e:
-                self.send_json(500, {'error': str(e)})
-            return
-
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'Master webhook handler is active')
-
-    def do_POST(self):
-        from urllib.parse import urlparse
-        parsed = urlparse(self.path)
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
-
-        try:
-            payload = json.loads(body.decode('utf-8'))
-        except Exception as e:
-            self.send_json(400, {'error': f'Invalid JSON payload: {e}'})
-            return
-
-        if parsed.path == '/api/manual':
-            order_id = payload.get('order_id')
-            if not order_id:
-                self.send_json(400, {'error': 'order_id is required'})
-                return
-            try:
-                order_res = shopify_api_call(f'orders/{order_id}.json')
-                if not order_res or not order_res.get('order'):
-                    self.send_json(404, {'error': 'Order not found in Shopify'})
-                    return
-                
-                result = process_order(
-                    order_res['order'], 
-                    add_featured_tag=payload.get('add_featured_tag', False), 
-                    force=True
-                )
-                self.send_json(200, result)
-            except Exception as e:
-                self.send_json(500, {'error': str(e)})
-            return
-
-        print("=" * 60)
-        print("SHOPIFY WEBHOOK RECEIVED")
-        print("=" * 60)
-        try:
-            result = process_order(payload, add_featured_tag=False, force=False)
-            self.send_json(200, result)
-        except Exception as e:
-            print(f"ERROR processing webhook: {e}")
-            import traceback
-            traceback.print_exc()
-            self.send_json(500, {'error': str(e)})
+MANUAL_TRIGGER_HTML = """
