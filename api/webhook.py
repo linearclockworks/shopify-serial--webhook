@@ -1,3 +1,4 @@
+# Summary: Unified Webhook & Manual Processing Hub with DYMO Print Queue Support
 import json
 import os
 import urllib.request
@@ -7,7 +8,6 @@ from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
-# Environment Configuration
 SHOPIFY_SHOP = os.environ.get('SHOPIFY_SHOP_NAME', '')
 SHOPIFY_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN', '')
 GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
@@ -15,8 +15,6 @@ GOOGLE_SHEET_ID_CLEARTIME = os.environ.get('GOOGLE_SHEET_ID_CLEARTIME', '')
 GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
 CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED', 'HZ']
-
-# ── Helper Functions ──────────────────────────────────────────────────────────
 
 def calculate_line_item_discount(item: dict) -> float:
     quantity = int(item.get('quantity', 1)) or 1
@@ -53,9 +51,10 @@ def queue_label_for_printing(sku, serial, is_cleartime=True):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         row = [sku, sn_text, 'PENDING', timestamp]
         sheet.insert_row(row, index=2)
+        print(f"✓ Queued DYMO label print job: {sku} | {sn_text}")
         return True
     except Exception as e:
-        print(f"⚠️ Could not queue label: {e}")
+        print(f"⚠️ Could not queue label print job: {e}")
         return False
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date, product_id):
@@ -79,11 +78,11 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         sheet.insert_row(row, index=2)
         try:
             sheet.update_cell(2, 2, f'=HYPERLINK("{product_url}", "{name_part}")')
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Hyperlink failed: {e}")
         return True
     except Exception as e:
-        print(f"Sheet log error: {e}")
+        print(f"✗ Sheet error: {e}")
         return False
 
 def log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date):
@@ -95,7 +94,7 @@ def log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date)
         sheet.insert_row(row, index=2)
         return True
     except Exception as e:
-        print(f"CT Sheet log error: {e}")
+        print(f"✗ CTClocks sheet error: {e}")
         return False
 
 def shopify_api_call(endpoint, method='GET', data=None):
@@ -110,7 +109,7 @@ def shopify_api_call(endpoint, method='GET', data=None):
         with urllib.request.urlopen(req, timeout=30) as response:
             return json.loads(response.read().decode())
     except Exception as e:
-        print(f"API Error: {e}")
+        print(f"✗ API Error: {e}")
         return None
 
 def shopify_graphql_call(query, variables=None):
@@ -128,7 +127,7 @@ def shopify_graphql_call(query, variables=None):
         with urllib.request.urlopen(req, timeout=30) as response:
             return json.loads(response.read().decode())
     except Exception as e:
-        print(f"GraphQL API Error: {e}")
+        print(f"✗ GraphQL API Error: {e}")
         return None
 
 def get_next_serial(key='global_serial_counter', prefix='LCK-'):
@@ -238,7 +237,7 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
             return {'product_id': new_product_id, 'variant_id': new_variant_id, 'title': new_title}
         return None
     except Exception as e:
-        print(f"Error creating product: {e}")
+        print(f"✗ Error creating product: {e}")
         return None
 
 def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
@@ -257,7 +256,7 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
         result = shopify_api_call('orders.json', method='POST', data=new_order)
         return bool(result and result.get('order'))
     except Exception as e:
-        print(f"Error creating sled order: {e}")
+        print(f"✗ Error creating sled order: {e}")
         return False
 
 def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_amount=0.0, discount_description="Discount", currency_code="USD"):
@@ -315,8 +314,27 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
       orderEditCommit(id: $id) { order { id } userErrors { field message } }
     }
     """
-    shopify_graphql_call(commit_mutation, {"id": calc_order_id})
+    res = shopify_graphql_call(commit_mutation, {"id": calc_order_id})
     return True, "Success"
+
+def add_serial_to_order_note(order_id, lck_serials, cleartime_serials):
+    try:
+        result = shopify_api_call(f'orders/{order_id}.json')
+        if not result:
+            return False
+        order = result.get('order', {})
+        current_note = order.get('note', '') or ''
+        note_parts = []
+        if lck_serials:
+            note_parts.append(f"Serial Number: {', '.join(lck_serials)}")
+        if cleartime_serials:
+            note_parts.append(f"Cleartime Serial Numbers: {', '.join(cleartime_serials)}")
+        serial_text = '\n'.join(note_parts)
+        new_note = f"{current_note}\n{serial_text}" if current_note else serial_text
+        shopify_api_call(f'orders/{order_id}.json', method='PUT', data={'order': {'note': new_note}})
+        return True
+    except Exception as e:
+        return False
 
 def process_order(order_data, add_featured_tag=False, force=False):
     order_id = order_data.get('id')
@@ -375,6 +393,9 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     cleartime_serials.append(serial)
                     log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date)
                     queue_label_for_printing(sku=sku, serial=f"11{serial}" if len(serial)==2 else serial, is_cleartime=True)
+
+    if lck_serials or cleartime_serials:
+        add_serial_to_order_note(order_id, lck_serials, cleartime_serials)
 
     if bryan_sled_items:
         create_sled_order_for_bryan(order_number, bryan_sled_items)
