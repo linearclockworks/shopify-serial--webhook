@@ -588,6 +588,16 @@ def mark_order_as_completed(order_id):
     except:
         return False
 
+def calculate_line_item_discount(item: dict) -> float:
+    """Calculates per-unit discount using discount_allocations to capture order-level codes."""
+    quantity = int(item.get('quantity', 1)) or 1
+    discount_allocations = item.get('discount_allocations', [])
+    if discount_allocations:
+        total_allocated = sum(float(alloc.get('amount', 0.0)) for alloc in discount_allocations)
+        return round(total_allocated / quantity, 2)
+    total_discount = float(item.get('total_discount', 0.0) or 0.0)
+    return round(total_discount / quantity, 2)        
+
 def process_order(order_data, add_featured_tag=False, force=False):
     """Process an order for both Hardwood and Cleartime clocks"""
     order_id = order_data.get('id')
@@ -627,8 +637,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
             product_id = item.get('product_id')
             line_item_id = item.get('id')
             
-            total_discount = float(item.get('total_discount', 0.0) or 0.0)
-            unit_discount = total_discount / quantity if quantity > 0 else 0.0
+            unit_discount = calculate_line_item_discount(item)
 
             print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Discount: ${unit_discount:.2f})")
 
@@ -672,8 +681,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     if new_product:
                         products_created.append(new_product['title'])
                         
-                        if not has_stock_discount:
-                            bryan_sled_items.append(new_product['title'])
+                        bryan_sled_items.append(new_product['title'])
 
                         log_to_google_sheet(new_product['title'], serial, order_number, customer_name, order_date, new_product['product_id'])
                         queue_label_for_printing(sku=sku, serial=serial, is_cleartime=False)
