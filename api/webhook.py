@@ -614,8 +614,12 @@ def process_order(order_data, add_featured_tag=False, force=False):
         return {'status': 'already_processing', 'order': order_number}
 
     try:
-        customer = order_data.get('customer', {})
+        # Safely handle null customer payloads from POS guest checkouts
+        customer = order_data.get('customer') or {}
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        if not customer_name:
+            customer_name = "Guest Checkout"
+
         created_at = order_data.get('created_at', '')
         currency_code = order_data.get('currency', 'USD')
 
@@ -633,7 +637,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
         cleartime_serials = []
         bryan_sled_items = []
 
-        for item in order_data.get('line_items', []):
+        for item in order_data.get('line_items', []) or []:
             product_title = item.get('title', '')
             variant_title = item.get('variant_title', '')
             sku = item.get('sku', '')
