@@ -234,7 +234,7 @@ def set_inventory_at_location(inventory_item_id, location_id, quantity):
         print(f"⚠️ Inventory processing failed at location {location_id}: {e}")
         return False
 
-def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None, variant_title=None):
+def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None, variant_title=None, override_price=None):
     """Create a new product based on the sample product with exact SKU matching and size in title"""
     try:
         result = shopify_api_call(f'products/{sample_product_id}.json')
@@ -252,18 +252,23 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
         images = [{'src': img.get('src')} for img in sample.get('images', [])]
         variants = sample.get('variants', [])
         
-        price = '0.00'
-        matched_variant_title = ''
-        if variants:
-            price = variants[0].get('price', '0.00')
-            if purchased_sku:
-                for v in variants:
-                    v_sku = v.get('sku', '')
-                    if v_sku and v_sku.strip().lower() == purchased_sku.strip().lower():
-                        price = v.get('price', price)
-                        matched_variant_title = v.get('title', '')
-                        print(f"✓ Match found! Variant SKU '{v_sku}' price used: ${price}")
-                        break
+        # Priority 1: Use the actual line item price from the order (handles manual price overrides)
+        if override_price is not None and str(override_price).strip() != '':
+            price = str(override_price)
+            matched_variant_title = ''
+        else:
+            price = '0.00'
+            matched_variant_title = ''
+            if variants:
+                price = variants[0].get('price', '0.00')
+                if purchased_sku:
+                    for v in variants:
+                        v_sku = v.get('sku', '')
+                        if v_sku and v_sku.strip().lower() == purchased_sku.strip().lower():
+                            price = v.get('price', price)
+                            matched_variant_title = v.get('title', '')
+                            print(f"✓ Match found! Variant SKU '{v_sku}' price used: ${price}")
+                            break
 
         search_text = f"{variant_title or ''} {matched_variant_title} {purchased_sku or ''}".lower()
         size_label = ''
@@ -614,11 +619,18 @@ def process_order(order_data, add_featured_tag=False, force=False):
         return {'status': 'already_processing', 'order': order_number}
 
     try:
-        # Safely handle null customer payloads from POS guest checkouts
+        # Safely handle null customer payloads (Admin Drafts, POS guest checkouts, PII redaction)
         customer = order_data.get('customer') or {}
+        shipping = order_data.get('shipping_address') or {}
+        billing = order_data.get('billing_address') or {}
+
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
         if not customer_name:
-            customer_name = "Guest Checkout"
+            customer_name = f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip()
+        if not customer_name:
+            customer_name = f"{billing.get('first_name', '')} {billing.get('last_name', '')}".strip()
+        if not customer_name:
+            customer_name = "Admin / Guest Order"
 
         created_at = order_data.get('created_at', '')
         currency_code = order_data.get('currency', 'USD')
@@ -645,10 +657,11 @@ def process_order(order_data, add_featured_tag=False, force=False):
             current_qty = item.get('current_quantity', quantity)
             product_id = item.get('product_id')
             line_item_id = item.get('id')
+            line_item_price = item.get('price')  # Captures manual price overrides set in Admin or POS
             
             unit_discount = calculate_line_item_discount(item)
 
-            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Unit Discount: ${unit_discount:.2f})")
+            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Price: \({line_item_price}, Unit Discount:\){unit_discount:.2f})")
 
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
@@ -684,7 +697,8 @@ def process_order(order_data, add_featured_tag=False, force=False):
                         serial, 
                         add_featured_tag=add_featured_tag, 
                         purchased_sku=sku,
-                        variant_title=variant_title
+                        variant_title=variant_title,
+                        override_price=line_item_price
                     )
                     
                     if new_product:
