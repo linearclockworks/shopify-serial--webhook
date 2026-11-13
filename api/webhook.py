@@ -20,6 +20,7 @@ GOOGLE_CREDS_JSON = os.environ.get('GOOGLE_CREDENTIALS', '')
 
 CLEARTIME_SKU_PREFIXES = ['CT', 'FA', 'MP', 'KIT', 'LED', 'HZ']
 
+
 def get_google_sheet(is_cleartime=False, worksheet_name=None):
     """Connect to a specific Google Sheet worksheet"""
     try:
@@ -42,6 +43,7 @@ def get_google_sheet(is_cleartime=False, worksheet_name=None):
         print(f"Sheet error: {e}")
         return None
 
+
 def queue_label_for_printing(sku, serial, is_cleartime=True):
     """Add label job to PrintQueue tab for local DYMO listener"""
     try:
@@ -59,6 +61,7 @@ def queue_label_for_printing(sku, serial, is_cleartime=True):
     except Exception as e:
         print(f"⚠️ Could not queue label print job: {e}")
         return False
+
 
 def log_to_google_sheet(product_name, serial, order_number, customer_name, order_date, product_id):
     """Add a new row to the main LCK Clocks Google Sheet with hyperlink"""
@@ -96,6 +99,7 @@ def log_to_google_sheet(product_name, serial, order_number, customer_name, order
         print(f"✗ Sheet error: {e}")
         return False
 
+
 def log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date):
     """Add a new row to the CTClocks Google Sheet"""
     try:
@@ -121,7 +125,8 @@ def log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date)
         print(f"✗ CTClocks sheet error: {e}")
         return False
 
-def shopify_api_call(endpoint, method='GET', data=None):
+
+def shopify_api_call(endpoint, method='GET', data=None, timeout=55):
     """Utility wrapper for executing REST API calls against Shopify Admin"""
     url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2026-01/{endpoint}"
     headers = {
@@ -131,13 +136,15 @@ def shopify_api_call(endpoint, method='GET', data=None):
     req_data = json.dumps(data).encode('utf-8') if data else None
     req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return json.loads(response.read().decode())
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            raw = response.read().decode()
+            return json.loads(raw) if raw else {}
     except Exception as e:
-        print(f"✗ API Error: {e}")
+        print(f"✗ API Error ({method} {endpoint}): {e}")
         return None
 
-def shopify_graphql_call(query, variables=None):
+
+def shopify_graphql_call(query, variables=None, timeout=55):
     """Utility wrapper for executing Shopify Admin GraphQL API mutations"""
     url = f"https://{SHOPIFY_SHOP}.myshopify.com/admin/api/2026-01/graphql.json"
     headers = {
@@ -151,11 +158,12 @@ def shopify_graphql_call(query, variables=None):
     req_data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=req_data, headers=headers, method='POST')
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode())
     except Exception as e:
         print(f"✗ GraphQL API Error: {e}")
         return None
+
 
 def get_next_serial(key='global_serial_counter', prefix='LCK-'):
     """Fetch next serial from Shopify Metafields counter and increment"""
@@ -180,6 +188,7 @@ def get_next_serial(key='global_serial_counter', prefix='LCK-'):
         return serial
     return None
 
+
 def swap_tags(tags_string, add_featured_tag=False):
     """Remove 'sample' tag. Add 'featured' tag only if add_featured_tag=True."""
     tags = [t.strip() for t in tags_string.split(',') if t.strip()]
@@ -192,6 +201,7 @@ def swap_tags(tags_string, add_featured_tag=False):
         tags = [t for t in tags if t.lower() != 'featured']
     
     return ', '.join(tags)
+
 
 def get_location_id_by_name(location_name):
     """Get Shopify location ID by location name"""
@@ -206,10 +216,11 @@ def get_location_id_by_name(location_name):
         print(f"⚠️ Could not fetch locations: {e}")
         return None
 
+
 def set_inventory_at_location(inventory_item_id, location_id, quantity):
     """Connect inventory item to target location and set available level"""
     if not inventory_item_id or not location_id:
-        print(f"✗ Cannot configure inventory: item_id or location_id is missing.")
+        print("✗ Cannot configure inventory: item_id or location_id is missing.")
         return False
     try:
         connect_data = {
@@ -234,15 +245,19 @@ def set_inventory_at_location(inventory_item_id, location_id, quantity):
         print(f"⚠️ Inventory processing failed at location {location_id}: {e}")
         return False
 
-def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None, variant_title=None, override_price=None):
+
+def create_product_from_sample(sample_product_id, serial, add_featured_tag=False, purchased_sku=None, variant_title=None, override_price=None, sample_product=None):
     """Create a new product based on the sample product with exact SKU matching and size in title"""
     try:
-        result = shopify_api_call(f'products/{sample_product_id}.json')
-        if not result:
-            print(f"✗ Could not fetch sample product {sample_product_id}")
-            return None
+        if sample_product:
+            sample = sample_product
+        else:
+            result = shopify_api_call(f'products/{sample_product_id}.json')
+            if not result:
+                print(f"✗ Could not fetch sample product {sample_product_id}")
+                return None
+            sample = result.get('product', {})
 
-        sample = result.get('product', {})
         base_title = sample.get('title', '')
         serial_only = serial.replace('LCK-', '')
 
@@ -303,7 +318,7 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
             }
         }
 
-        result = shopify_api_call('products.json', method='POST', data=new_product)
+        result = shopify_api_call('products.json', method='POST', data=new_product, timeout=55)
 
         if result and result.get('product'):
             new_product_id = result['product']['id']
@@ -324,13 +339,14 @@ def create_product_from_sample(sample_product_id, serial, add_featured_tag=False
                     tag_status = "featured (visible)" if add_featured_tag else "no featured tag (hidden)"
                     print(f"✓ Created from 'sample' tag → qty=1 at location, {tag_status}")
                 else:
-                    print(f"⚠️ Could not find 'SandedNBranded' location - using default location")
+                    print("⚠️ Could not find 'SandedNBranded' location - using default location")
             
             return {'product_id': new_product_id, 'variant_id': new_variant_id, 'title': new_title}
         return None
     except Exception as e:
         print(f"✗ Error creating product: {e}")
         return None
+
 
 def get_sled_replacement_variant():
     """Look up the 'Sled replacement' product variant ID and price from Shopify"""
@@ -355,6 +371,7 @@ def get_sled_replacement_variant():
         print(f"⚠️ Error fetching sled replacement variant: {e}")
         return None, '0.00'
 
+
 def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
     """Create a $0.00 order assigned to Bryan Crider for 'Sled replacement' products at no charge"""
     try:
@@ -364,8 +381,8 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
         for item_title in sled_item_titles:
             item_payload = {
                 'quantity': 1,
-                'price': '0.00',  # Explicit price override to $0.00
-                'title': f"Sled for {item_title}"  # Title includes clock details cleanly (no properties/code icon)
+                'price': '0.00',
+                'title': f"Sled for {item_title}"
             }
             if sled_variant_id:
                 item_payload['variant_id'] = int(sled_variant_id)
@@ -385,8 +402,8 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
                     'last_name': 'Crider'
                 },
                 'line_items': line_items,
-                'financial_status': 'paid',  # Fully settled at $0.00
-                'applied_discount': {        # 100% order discount
+                'financial_status': 'paid',
+                'applied_discount': {
                     'title': '100% Sled Discount',
                     'value': '100.0',
                     'value_type': 'percentage'
@@ -406,6 +423,7 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
     except Exception as e:
         print(f"✗ Error creating Bryan Crider sled order: {e}")
         return False
+
 
 def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_amount=0.0, discount_description="Discount", currency_code="USD"):
     """Executes GraphQL sequence to swap out the sample for the serialized product on an order and re-apply discounts"""
@@ -488,7 +506,7 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
     if not res or 'errors' in res or not res.get('data', {}).get('orderEditAddVariant') or res['data']['orderEditAddVariant'].get('userErrors'):
         return False, f"orderEditAddVariant failure: {res}"
         
-    print(f"✓ Successfully staged addition of serialized unique variant")
+    print("✓ Successfully staged addition of serialized unique variant")
 
     if discount_amount > 0:
         added_edges = res['data']['orderEditAddVariant']['calculatedOrder'].get('addedLineItems', {}).get('edges', [])
@@ -532,6 +550,7 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
         
     return True, "Success"
 
+
 def add_serial_to_order_note(order_id, lck_serials, cleartime_serials, swap_status=None):
     """Append serial numbers to order notes"""
     try:
@@ -559,6 +578,7 @@ def add_serial_to_order_note(order_id, lck_serials, cleartime_serials, swap_stat
         print(f"✗ Error updating note: {e}")
         return False
 
+
 def try_acquire_processing_lock(order_id):
     """Atomic locking mechanism to avoid duplicate webhooks"""
     try:
@@ -575,8 +595,21 @@ def try_acquire_processing_lock(order_id):
         }
         shopify_api_call(f'orders/{order_id}/metafields.json', method='POST', data=lock_data)
         return True
-    except:
+    except Exception:
         return False
+
+
+def release_processing_lock(order_id):
+    """Delete processing_lock metafield if an error prevents completion"""
+    try:
+        result = shopify_api_call(f'orders/{order_id}/metafields.json?namespace=webhook&key=processing_lock')
+        if result and result.get('metafields'):
+            mf_id = result['metafields'][0]['id']
+            shopify_api_call(f'metafields/{mf_id}.json', method='DELETE')
+            print(f"🔓 Released processing lock for order {order_id} after incomplete run")
+    except Exception as e:
+        print(f"⚠️ Could not release processing lock: {e}")
+
 
 def mark_order_as_completed(order_id):
     """Mark order completed with metafield tag"""
@@ -590,8 +623,9 @@ def mark_order_as_completed(order_id):
             }
         })
         return True
-    except:
+    except Exception:
         return False
+
 
 def calculate_line_item_discount(item: dict) -> float:
     """Calculates per-unit discount using discount_allocations to capture order-level codes."""
@@ -601,14 +635,15 @@ def calculate_line_item_discount(item: dict) -> float:
         total_allocated = sum(float(alloc.get('amount', 0.0)) for alloc in discount_allocations)
         return round(total_allocated / quantity, 2)
     total_discount = float(item.get('total_discount', 0.0) or 0.0)
-    return round(total_discount / quantity, 2)        
+    return round(total_discount / quantity, 2)
+
 
 def process_order(order_data, add_featured_tag=False, force=False):
     """Process an order for both Hardwood and Cleartime clocks"""
     order_id = order_data.get('id')
     order_number = order_data.get('name', '')
 
-    # 🛑 IMMEDIATELY SKIP COMPANION SLED ORDERS TO PREVENT WEBHOOK LOOPS
+    # Immediately skip companion sled orders to prevent webhook loops
     raw_tags = order_data.get('tags', '') or ''
     order_tags = [t.strip().lower() for t in raw_tags.split(',') if t.strip()]
     if 'sled' in order_tags or 'bryan crider' in order_tags:
@@ -618,8 +653,9 @@ def process_order(order_data, add_featured_tag=False, force=False):
     if not force and not try_acquire_processing_lock(order_id):
         return {'status': 'already_processing', 'order': order_number}
 
+    had_errors = False
+
     try:
-        # Safely handle null customer payloads (Admin Drafts, POS guest checkouts, PII redaction)
         customer = order_data.get('customer') or {}
         shipping = order_data.get('shipping_address') or {}
         billing = order_data.get('billing_address') or {}
@@ -637,7 +673,7 @@ def process_order(order_data, add_featured_tag=False, force=False):
 
         try:
             order_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
-        except:
+        except Exception:
             order_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         disc_desc = order_data.get('discount_codes', [{}])[0].get('code', 'Discount') if order_data.get('discount_codes') else 'Discount'
@@ -657,11 +693,11 @@ def process_order(order_data, add_featured_tag=False, force=False):
             current_qty = item.get('current_quantity', quantity)
             product_id = item.get('product_id')
             line_item_id = item.get('id')
-            line_item_price = item.get('price')  # Captures manual price overrides set in Admin or POS
+            line_item_price = item.get('price')
             
             unit_discount = calculate_line_item_discount(item)
 
-            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Price: \({line_item_price}, Unit Discount:\){unit_discount:.2f})")
+            print(f"Line item: {product_title} - {variant_title} (SKU: {sku}, Qty: {quantity}, Current: {current_qty}, Price: ${line_item_price}, Unit Discount: ${unit_discount:.2f})")
 
             if not current_qty or current_qty == 0:
                 print(f"⏭️ Skipping removed line item: {product_title}")
@@ -673,35 +709,39 @@ def process_order(order_data, add_featured_tag=False, force=False):
             if sku and sku.upper().startswith('LCK-'):
                 product_result = shopify_api_call(f'products/{product_id}.json')
                 if product_result:
-                    tags = product_result.get('product', {}).get('tags', '')
+                    sample_product = product_result.get('product', {})
+                    tags = sample_product.get('tags', '')
                     tags_list = [tag.strip().lower() for tag in tags.split(',') if tag.strip()]
 
                     if 'featured' in tags_list:
-                        print(f"⏭️ Skipping - product tagged 'featured'")
+                        print("⏭️ Skipping - product tagged 'featured'")
                         continue
                     if 'sample' not in tags_list:
-                        print(f"⏭️ Skipping - product not tagged 'sample'")
+                        print("⏭️ Skipping - product not tagged 'sample'")
                         continue
                 else:
-                    print(f"⚠️ Could not fetch product tags - skipping for safety")
+                    print("⚠️ Could not fetch product tags - skipping for safety")
+                    had_errors = True
                     continue
 
                 for i in range(current_qty):
                     serial = get_next_serial(key='global_serial_counter', prefix='LCK-')
                     if not serial:
+                        had_errors = True
                         continue
 
-                    lck_serials.append(serial)
                     new_product = create_product_from_sample(
                         product_id, 
                         serial, 
                         add_featured_tag=add_featured_tag, 
                         purchased_sku=sku,
                         variant_title=variant_title,
-                        override_price=line_item_price
+                        override_price=line_item_price,
+                        sample_product=sample_product
                     )
                     
                     if new_product:
+                        lck_serials.append(serial)
                         products_created.append(new_product['title'])
                         bryan_sled_items.append(new_product['title'])
 
@@ -718,6 +758,9 @@ def process_order(order_data, add_featured_tag=False, force=False):
                         )
                         swap_status = "Swapped successfully" if swap_success else "Note fallback only"
                         print(f"Order swap status for {serial}: {swap_status} ({swap_msg if not swap_success else ''})")
+                    else:
+                        print(f"✗ Product creation failed for {serial}; skipping note/sync so order can retry cleanly.")
+                        had_errors = True
 
             # Cleartime Clocks (SKU starts with CT, FA, MP, KIT, LED, HZ)
             elif sku and is_cleartime:
@@ -726,13 +769,26 @@ def process_order(order_data, add_featured_tag=False, force=False):
                     if serial:
                         cleartime_serials.append(serial)
                         log_to_cleartime_sheet(sku, serial, order_number, customer_name, order_date)
-                        queue_label_for_printing(sku=sku, serial=f"11{serial}" if len(serial)==2 else serial, is_cleartime=True)
+                        queue_label_for_printing(sku=sku, serial=f"11{serial}" if len(serial) == 2 else serial, is_cleartime=True)
+                    else:
+                        had_errors = True
 
         if lck_serials or cleartime_serials:
             add_serial_to_order_note(order_id, lck_serials, cleartime_serials)
 
         if bryan_sled_items:
             create_sled_order_for_bryan(order_number, bryan_sled_items)
+
+        if had_errors:
+            if not force:
+                release_processing_lock(order_id)
+            return {
+                'status': 'partial_error',
+                'order': order_number,
+                'products': products_created,
+                'lck_serials': lck_serials,
+                'cleartime_serials': cleartime_serials
+            }
 
         if not force:
             mark_order_as_completed(order_id)
@@ -747,7 +803,10 @@ def process_order(order_data, add_featured_tag=False, force=False):
         }
     except Exception as e:
         print(f"ERROR during processing: {e}")
+        if not force:
+            release_processing_lock(order_id)
         raise
+
 
 # ── Manual trigger UI ────────────────────────────────────────────────────────
 
