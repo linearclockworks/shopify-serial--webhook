@@ -426,7 +426,7 @@ def create_sled_order_for_bryan(orig_order_number, sled_item_titles):
 
 
 def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_amount=0.0, discount_description="Discount", currency_code="USD"):
-    """Executes GraphQL sequence to swap out the sample for the serialized product on an order and re-apply discounts"""
+    """Executes GraphQL sequence to swap out the sample for the serialized product on an order and re-apply non-automatic discounts"""
     print(f"Starting line item swap sequence for Order ID: {order_id}")
     
     begin_mutation = """
@@ -484,6 +484,16 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
     add_mutation = """
     mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
       orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
+        calculatedLineItem {
+          id
+          calculatedDiscountAllocations {
+            allocatedAmountSet {
+              shopMoney {
+                amount
+              }
+            }
+          }
+        }
         calculatedOrder { 
           id 
           addedLineItems(first: 5) {
@@ -506,12 +516,29 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
     if not res or 'errors' in res or not res.get('data', {}).get('orderEditAddVariant') or res['data']['orderEditAddVariant'].get('userErrors'):
         return False, f"orderEditAddVariant failure: {res}"
         
-    print("✓ Successfully staged addition of serialized unique variant")
+    print(f"✓ Successfully staged addition of serialized unique variant")
 
-    if discount_amount > 0:
-        added_edges = res['data']['orderEditAddVariant']['calculatedOrder'].get('addedLineItems', {}).get('edges', [])
-        if added_edges:
-            new_line_item_gid = added_edges[-1]['node']['id']
+    # Prevent double-discounting when Shopify already auto-applies an order-level discount code
+    add_payload = res['data']['orderEditAddVariant']
+    calc_line_item = add_payload.get('calculatedLineItem') or {}
+    auto_allocations = calc_line_item.get('calculatedDiscountAllocations') or []
+    auto_applied_discount = sum(
+        float(a.get('allocatedAmountSet', {}).get('shopMoney', {}).get('amount', 0.0))
+        for a in auto_allocations
+    )
+    remaining_discount = round(discount_amount - auto_applied_discount, 2)
+
+    if auto_applied_discount > 0:
+        print(f"ℹ️ Shopify already auto-applied ${auto_applied_discount:.2f} order-level discount to the new item.")
+
+    if remaining_discount > 0:
+        new_line_item_gid = calc_line_item.get('id')
+        if not new_line_item_gid:
+            added_edges = add_payload.get('calculatedOrder', {}).get('addedLineItems', {}).get('edges', [])
+            if added_edges:
+                new_line_item_gid = added_edges[-1]['node']['id']
+
+        if new_line_item_gid:
             discount_mutation = """
             mutation orderEditAddLineItemDiscount($id: ID!, $lineItemId: ID!, $discount: OrderEditAppliedDiscountInput!) {
               orderEditAddLineItemDiscount(id: $id, lineItemId: $lineItemId, discount: $discount) {
@@ -526,13 +553,13 @@ def execute_line_item_swap(order_id, old_line_item_id, new_variant_id, discount_
                 "discount": {
                     "description": discount_description,
                     "fixedValue": {
-                        "amount": f"{discount_amount:.2f}",
+                        "amount": f"{remaining_discount:.2f}",
                         "currencyCode": currency_code
                     }
                 }
             })
             if disc_res and not disc_res.get('data', {}).get('orderEditAddLineItemDiscount', {}).get('userErrors'):
-                print(f"✓ Re-applied original line item discount of ${discount_amount:.2f}")
+                print(f"✓ Re-applied remaining line item discount of ${remaining_discount:.2f}")
             else:
                 print(f"⚠️ Failed to re-apply line item discount: {disc_res}")
 
