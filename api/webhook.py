@@ -44,6 +44,16 @@ def get_google_sheet(is_cleartime=False, worksheet_name=None):
         return None
 
 
+def get_bryan_customer_id(shop_url, headers):
+    res = requests.get(
+        f"https://{shop_url}/admin/api/2026-01/customers/search.json",
+        headers=headers,
+        params={"query": "email:bryannmj@sandedandbranded.com"},
+        timeout=10,
+    ).json()
+    customers = res.get("customers") or []
+    return customers[0]["id"] if customers else None
+
 def queue_label_for_printing(sku, serial, is_cleartime=True):
     """Add label job to PrintQueue tab for local DYMO listener"""
     try:
